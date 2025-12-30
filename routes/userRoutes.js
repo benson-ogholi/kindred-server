@@ -204,4 +204,34 @@ router.get("/:id", protect, async (req, res) => {
   }
 });
 
+// Update Expo Push Token
+router.patch("/push-token", protect, async (req, res) => {
+  try {
+    const { expoPushToken } = req.body;
+
+    if (!expoPushToken) {
+      return res.status(400).json({ message: "expoPushToken is required" });
+    }
+
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    user.expoPushToken = expoPushToken;
+
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Expo push token updated successfully",
+      expoPushToken: user.expoPushToken,
+    });
+  } catch (error) {
+    console.error("🔥 Update Expo Push Token Error:", error);
+    res.status(500).json({ message: "Server error updating push token" });
+  }
+});
+
 module.exports = router;
