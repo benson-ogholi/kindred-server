@@ -230,7 +230,7 @@ router.post("/forgot-password", async (req, res) => {
   }
 });
 
-// RESET PASSWORD (Updated with Bypass)
+
 router.post("/reset-password", async (req, res) => {
   try {
     let { email, otp, newPassword } = req.body;
