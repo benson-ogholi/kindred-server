@@ -48,10 +48,10 @@ router.post("/", protect, upload.single("image"), async (req, res) => {
   }
 });
 
-router.get("/family/:familyId", protect, async (req, res) => {
+router.get("/family/:familyId/suggestions", protect, async (req, res) => {
   try {
-    const userId = req.user._id;
     const { familyId } = req.params;
+    const userId = req.user._id;
 
     const suggestions = await Suggestion.find({ familyId })
       .populate("sender", "firstName lastName profilePicture")
@@ -59,12 +59,14 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
     const enrichedSuggestions = suggestions.map((s) => {
       const obj = s.toObject();
+      const isReadArray = Array.isArray(obj.isRead) ? obj.isRead : [];
+
       return {
         ...obj,
-        isOwner: s.sender._id.toString() === userId.toString(),
-        upvoteCount: s.upvotes.length,
-        hasUpvoted: s.upvotes.includes(userId),
-        isNew: !s.isRead.some(id => id.toString() === userId.toString())
+        isOwner: obj.sender?._id?.toString() === userId.toString(),
+        upvoteCount: Array.isArray(obj.upvotes) ? obj.upvotes.length : 0,
+        hasUpvoted: Array.isArray(obj.upvotes) ? obj.upvotes.some(u => u.toString() === userId.toString()) : false,
+        isNew: !isReadArray.some(id => id && id.toString() === userId.toString())
       };
     });
 
@@ -75,6 +77,7 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
     res.json({ success: true, suggestions: enrichedSuggestions });
   } catch (error) {
+    console.error("❌ Suggestion Fetch Error:", error);
     res.status(500).json({ message: "Error fetching suggestions" });
   }
 });

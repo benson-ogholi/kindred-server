@@ -111,7 +111,7 @@ router.get("/family/:familyId/:type", protect, async (req, res) => {
     const { familyId, type } = req.params;
     const currentUserId = req.user._id;
 
-    // 1. 🔹 Fetch the contents
+    // 1. Fetch contents
     const contents = await FamilyContent.find({
       familyId: familyId,
       contentType: type,
@@ -119,33 +119,36 @@ router.get("/family/:familyId/:type", protect, async (req, res) => {
       .populate("creator", "firstName lastName profilePicture")
       .sort({ createdAt: -1 });
 
-    // 2. 🔹 Map the data FIRST to capture the "New" status
+    // 2. Map and enrich
     const enriched = contents.map((item) => {
       const itemObj = item.toObject();
 
-      // If the user's ID is NOT in the isRead array, it's a NEW post for them
-      const isNewForUser = !itemObj.isRead.some(
-        (id) => id.toString() === currentUserId.toString()
+      // Ensure isRead is always an array
+      const isReadArray = Array.isArray(itemObj.isRead) ? itemObj.isRead : [];
+
+      // Check if current user has read it
+      const isNewForUser = !isReadArray.some(
+        (id) => id && id.toString() === currentUserId.toString()
       );
+
+      // Safely get creator ID
+      const creatorId = itemObj.creator?._id?.toString() || null;
 
       return {
         ...itemObj,
-        isOwner: itemObj.creator?._id.toString() === currentUserId.toString(),
-        isNew: isNewForUser, // <--- This tells the frontend to show a "NEW" badge
+        isOwner: creatorId === currentUserId.toString(),
+        isNew: isNewForUser,
       };
     });
 
-    // 3. 🔹 NOW update the database in the background
-    // This ensures that next time they open the app, these won't be "New"
+    // 3. Update read status for current user
     await FamilyContent.updateMany(
       {
         familyId: familyId,
         contentType: type,
         isRead: { $ne: currentUserId },
       },
-      {
-        $addToSet: { isRead: currentUserId },
-      }
+      { $addToSet: { isRead: currentUserId } }
     );
 
     res.json({
@@ -153,6 +156,7 @@ router.get("/family/:familyId/:type", protect, async (req, res) => {
       contents: enriched,
     });
   } catch (error) {
+    console.error("❌ Fetch Family Content Error:", error);
     res.status(500).json({ message: error.message });
   }
 });

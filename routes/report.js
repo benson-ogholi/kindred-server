@@ -60,6 +60,7 @@ router.post("/", protect, async (req, res) => {
 
 // @desc    Get all reports for a family (with isOwner toggle)
 // @route   GET /api/reports/family/:familyId
+// @route   GET /api/reports/family/:familyId
 router.get("/family/:familyId", protect, async (req, res) => {
   try {
     const userId = req.user._id;
@@ -70,11 +71,16 @@ router.get("/family/:familyId", protect, async (req, res) => {
       .populate("sharedWith", "firstName lastName")
       .sort({ createdAt: -1 });
 
-    const enrichedReports = reports.map((report) => ({
-      ...report.toObject(),
-      isOwner: report.sender._id.toString() === userId.toString(),
-      isNew: !report.isRead.some(id => id.toString() === userId.toString())
-    }));
+    const enrichedReports = reports.map((report) => {
+      const reportObj = report.toObject();
+      const isReadArray = Array.isArray(reportObj.isRead) ? reportObj.isRead : [];
+
+      return {
+        ...reportObj,
+        isOwner: reportObj.sender?._id?.toString() === userId.toString(),
+        isNew: !isReadArray.some(id => id && id.toString() === userId.toString())
+      };
+    });
 
     // Mark all as read for this user
     await Report.updateMany(
@@ -84,6 +90,7 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
     res.json({ success: true, reports: enrichedReports });
   } catch (error) {
+    console.error("❌ Report Fetch Error:", error);
     res.status(500).json({ message: "Error fetching reports" });
   }
 });

@@ -81,7 +81,6 @@ router.post(
   }
 );
 
-
 router.get("/family/:familyId", protect, async (req, res) => {
   try {
     const { familyId } = req.params;
@@ -91,11 +90,21 @@ router.get("/family/:familyId", protect, async (req, res) => {
       .populate("author", "firstName lastName")
       .sort({ createdAt: -1 });
 
-    const enrichedNews = news.map((item) => ({
-      ...item.toObject(),
-      isNew: !item.isRead.some((id) => id.toString() === userId.toString()),
-    }));
+    const enrichedNews = news.map((item) => {
+      const itemObj = item.toObject();
 
+      // Safely handle isRead
+      const isReadArray = Array.isArray(itemObj.isRead) ? itemObj.isRead : [];
+
+      return {
+        ...itemObj,
+        isNew: !isReadArray.some(
+          (id) => id && id.toString() === userId.toString()
+        ),
+      };
+    });
+
+    // Mark all as read for current user
     await News.updateMany(
       { family: familyId, isRead: { $ne: userId } },
       { $addToSet: { isRead: userId } }
@@ -103,6 +112,7 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
     res.status(200).json({ news: enrichedNews });
   } catch (error) {
+    console.error("❌ Fetch News Error:", error);
     res.status(500).json({ message: "Failed to fetch news" });
   }
 });

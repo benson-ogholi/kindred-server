@@ -43,43 +43,44 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
     // 1. 🔹 Fetch the polls
     const polls = await Poll.find({ familyId })
-      .populate("sender", "firstName lastName profilePicture") // Adjusted to your User schema fields
+      .populate("sender", "firstName lastName profilePicture")
       .sort({ createdAt: -1 });
 
-    // 2. 🔹 Enrich data and identify "isNew" before updating the DB
+    // 2. 🔹 Enrich data and identify "isNew" safely
     const enrichedPolls = polls.map((poll) => {
       const pollObj = poll.toObject();
+      const isReadArray = Array.isArray(pollObj.isRead) ? pollObj.isRead : [];
+
       let totalVotes = 0;
       let userVotedOptionId = null;
 
       pollObj.options.forEach((opt) => {
-        totalVotes += opt.votes.length;
-        if (opt.votes.some((v) => v.toString() === currentUserId.toString())) {
-          userVotedOptionId = opt._id;
+        totalVotes += Array.isArray(opt.votes) ? opt.votes.length : 0;
+
+        if (Array.isArray(opt.votes)) {
+          const voted = opt.votes.find(
+            (v) => v && v.toString() === currentUserId.toString()
+          );
+          if (voted) userVotedOptionId = opt._id;
         }
       });
 
       return {
         ...pollObj,
-        isOwner: poll.sender._id.toString() === currentUserId.toString(),
+        isOwner: pollObj.sender?._id?.toString() === currentUserId.toString(),
         totalVotes,
         userVotedOptionId,
-        isExpired: poll.endDate ? new Date() > new Date(poll.endDate) : false,
-        // 🔹 Check if user hasn't seen this yet
-        isNew: !poll.isRead.some((id) => id.toString() === currentUserId.toString()),
+        isExpired: pollObj.endDate ? new Date() > new Date(pollObj.endDate) : false,
+        isNew: !isReadArray.some(
+          (id) => id && id.toString() === currentUserId.toString()
+        ),
       };
     });
 
     // 3. 🔹 Mark all polls in this family as READ for this user
-    // This clears the global unread count for the next time they call getFamily
     await Poll.updateMany(
-      { 
-        familyId, 
-        isRead: { $ne: currentUserId } 
-      },
-      { 
-        $addToSet: { isRead: currentUserId } 
-      }
+      { familyId, isRead: { $ne: currentUserId } },
+      { $addToSet: { isRead: currentUserId } }
     );
 
     res.json({ success: true, polls: enrichedPolls });

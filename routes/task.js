@@ -68,18 +68,24 @@ router.get("/family/:familyId", protect, async (req, res) => {
       .populate("createdBy", "firstName lastName")
       .sort({ createdAt: -1 });
 
-    const enrichedTasks = tasks.map((task) => ({
-      ...task.toObject(),
-      isNew: !task.isRead.some(id => id.toString() === userId.toString())
-    }));
+    const enrichedTasks = tasks.map((task) => {
+      const taskObj = task.toObject();
+      const isReadArray = Array.isArray(taskObj.isRead) ? taskObj.isRead : [];
+
+      return {
+        ...taskObj,
+        isNew: !isReadArray.some(id => id && id.toString() === userId.toString()),
+      };
+    });
 
     await Task.updateMany(
       { family: familyId, isRead: { $ne: userId } },
       { $addToSet: { isRead: userId } }
     );
 
-    res.status(200).json({ tasks: enrichedTasks });
+    res.status(200).json({ success: true, tasks: enrichedTasks });
   } catch (error) {
+    console.error("❌ Task Fetch Error:", error);
     res.status(500).json({ message: "Failed to fetch tasks" });
   }
 });
