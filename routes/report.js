@@ -47,26 +47,30 @@ router.post("/", protect, async (req, res) => {
 router.get("/family/:familyId", protect, async (req, res) => {
   try {
     const userId = req.user._id;
-    const reports = await Report.find({ familyId: req.params.familyId })
-      .populate("sender", "name profilePicture")
-      .populate("sharedWith", "name")
+    const { familyId } = req.params;
+
+    const reports = await Report.find({ familyId })
+      .populate("sender", "firstName lastName profilePicture")
+      .populate("sharedWith", "firstName lastName")
       .sort({ createdAt: -1 });
 
-    // Map through reports to add the 'isOwner' flag
-    const enrichedReports = reports.map((report) => {
-      const reportObj = report.toObject();
-      return {
-        ...reportObj,
-        isOwner: report.sender._id.toString() === userId.toString(),
-      };
-    });
+    const enrichedReports = reports.map((report) => ({
+      ...report.toObject(),
+      isOwner: report.sender._id.toString() === userId.toString(),
+      isNew: !report.isRead.some(id => id.toString() === userId.toString())
+    }));
+
+    // Mark all as read for this user
+    await Report.updateMany(
+      { familyId, isRead: { $ne: userId } },
+      { $addToSet: { isRead: userId } }
+    );
 
     res.json({ success: true, reports: enrichedReports });
   } catch (error) {
     res.status(500).json({ message: "Error fetching reports" });
   }
 });
-
 // @desc    Update a report
 // @route   PUT /api/reports/:id
 router.put("/:id", protect, async (req, res) => {

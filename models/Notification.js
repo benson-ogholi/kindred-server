@@ -24,10 +24,12 @@ const notificationSchema = new mongoose.Schema(
         "POLL_CREATED",
         "REPORT_SUBMITTED",
         "NEWS_UPDATE",
+        "FAMILY_UPDATE",
         "FAMILY_JOIN_ACCEPTED",
         "DONATION_CREATED", // Updated from NEW_DONATION
         "DONATION_UPDATED", // Added for edits
         "DONATION_DELETED", // Added for removals
+        "FAMILY_JOIN_REQUEST",
       ],
     },
     title: {

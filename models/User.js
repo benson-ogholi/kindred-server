@@ -28,7 +28,11 @@ const userSchema = new mongoose.Schema(
       maxlength: 300,
       default: "",
     },
-
+    profilePicture: {
+      type: String,
+      default: null, // Stores the Backblaze URL
+    },
+    
     password: {
       type: String,
       required: true,
@@ -52,6 +56,7 @@ const userSchema = new mongoose.Schema(
         type: Boolean,
         default: true,
       },
+      // Added to match the "Show my contact details" toggle
       showContactDetailsToFamily: {
         type: Boolean,
         default: true,
@@ -70,21 +75,24 @@ const userSchema = new mongoose.Schema(
         enabled: { type: Boolean, default: false },
       },
 
+      // Matches: "Receive donation notifications"
       donationNotifications: {
         type: Boolean,
         default: true,
       },
+      // Matches: "Receive withdrawal notifications"
       withdrawalNotifications: {
         type: Boolean,
         default: true,
       },
     },
+    
     savedFamilies: [
-        {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: "Family",
-        },
-      ],
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Family",
+      },
+    ],
   },
   { timestamps: true }
 );

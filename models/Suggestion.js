@@ -12,25 +12,11 @@ const suggestionSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
-    title: {
-      type: String,
-      required: [true, "Title is required"],
-      trim: true,
-    },
-    description: {
-      type: String,
-      required: [true, "Description is required"],
-    },
-    imageUrl: {
-      type: String,
-      default: null,
-    },    readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // <-- NEW
-    upvotes: [
-      {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "User",
-      },
-    ],
+    title: { type: String, required: true, trim: true },
+    description: { type: String, required: true },
+    imageUrl: { type: String, default: null },
+    isRead: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Standardized
+    upvotes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     status: {
       type: String,
       enum: ["pending", "reviewed", "implemented"],
@@ -39,5 +25,12 @@ const suggestionSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+suggestionSchema.pre("save", function (next) {
+  if (this.isNew && !this.isRead.includes(this.sender)) {
+    this.isRead.push(this.sender);
+  }
+  next();
+});
 
 module.exports = mongoose.model("Suggestion", suggestionSchema);

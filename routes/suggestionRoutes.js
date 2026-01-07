@@ -50,20 +50,28 @@ router.post("/", protect, upload.single("image"), async (req, res) => {
 
 router.get("/family/:familyId", protect, async (req, res) => {
   try {
-    const suggestions = await Suggestion.find({ familyId: req.params.familyId })
-      .populate("sender", "name profilePicture")
+    const userId = req.user._id;
+    const { familyId } = req.params;
+
+    const suggestions = await Suggestion.find({ familyId })
+      .populate("sender", "firstName lastName profilePicture")
       .sort({ createdAt: -1 });
 
-    // Add isOwner and hasUpvoted flags
     const enrichedSuggestions = suggestions.map((s) => {
       const obj = s.toObject();
       return {
         ...obj,
-        isOwner: s.sender._id.toString() === req.user._id.toString(),
+        isOwner: s.sender._id.toString() === userId.toString(),
         upvoteCount: s.upvotes.length,
-        hasUpvoted: s.upvotes.includes(req.user._id),
+        hasUpvoted: s.upvotes.includes(userId),
+        isNew: !s.isRead.some(id => id.toString() === userId.toString())
       };
     });
+
+    await Suggestion.updateMany(
+      { familyId, isRead: { $ne: userId } },
+      { $addToSet: { isRead: userId } }
+    );
 
     res.json({ success: true, suggestions: enrichedSuggestions });
   } catch (error) {

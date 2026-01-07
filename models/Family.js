@@ -18,6 +18,7 @@ const FamilySchema = new mongoose.Schema(
         "Religious Group",
       ],
       required: true,
+      
     },
     description: {
       type: String,

@@ -2,6 +2,10 @@ const express = require("express");
 const router = express.Router();
 const User = require("../models/User");
 const { protect } = require("../middlewares/authMiddleware");
+const { uploadToBackblaze } = require("../utils/uploadToBackblaze");
+const multer = require("multer"); // <-- This is required for upload
+const upload = multer({ storage: multer.memoryStorage() });
+
 
 router.get("/profile", protect, async (req, res) => {
   try {
@@ -22,151 +26,130 @@ router.get("/profile", protect, async (req, res) => {
   }
 });
 
+router.patch(
+  "/profile-picture",
+  protect,
+  upload.single("image"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: "Please upload an image" });
+      }
+
+      // 1. Upload to Backblaze
+      const fileName = `profile_${req.user._id}_${Date.now()}`;
+      const folder = "profile-pictures";
+
+      const imageUrl = await uploadToBackblaze(
+        req.file.buffer,
+        req.file.originalname,
+        folder
+      );
+
+      // 2. Save URL to User in DB
+      const user = await User.findByIdAndUpdate(
+        req.user._id,
+        { profilePicture: imageUrl },
+        { new: true }
+      ).select("-password");
+
+      res.status(200).json({
+        success: true,
+        message: "Profile picture updated successfully",
+        profilePicture: imageUrl,
+        user,
+      });
+    } catch (error) {
+      console.error("🔥 Profile Picture Upload Error:", error);
+      res.status(500).json({ message: "Server error uploading image" });
+    }
+  }
+);
+
 router.patch("/profile", protect, async (req, res) => {
   try {
     console.log("🟢 UPDATE PROFILE HIT");
-    console.log("➡️ Payload:", req.body);
-    console.log("➡️ User:", req.user._id);
-
     const user = await User.findById(req.user._id);
 
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    /* =====================================================
-       🔧 ENSURE NESTED OBJECTS EXIST (CRITICAL FIX)
-    ====================================================== */
-    if (!user.privacySettings) {
-      user.privacySettings = {
-        showNameInDonations: true,
-        showContactDetailsToFamily: true,
-      };
-    }
+    // Ensure nested objects exist
+    if (!user.privacySettings) user.privacySettings = {};
+    if (!user.notificationPreferences)
+      user.notificationPreferences = { push: {}, email: {}, sms: {} };
 
-    if (!user.notificationPreferences) {
-      user.notificationPreferences = {
-        push: { enabled: true },
-        email: { enabled: true },
-        sms: { enabled: false },
-        donationNotifications: true,
-        withdrawalNotifications: true,
-      };
-    }
-
-    if (!user.notificationPreferences.push) {
-      user.notificationPreferences.push = { enabled: true };
-    }
-    if (!user.notificationPreferences.email) {
-      user.notificationPreferences.email = { enabled: true };
-    }
-    if (!user.notificationPreferences.sms) {
-      user.notificationPreferences.sms = { enabled: false };
-    }
-
-    /* =====================================================
-       1️⃣ BASIC INFORMATION
-    ====================================================== */
     const {
       firstName,
       lastName,
       phone,
       dateOfBirth,
-      email,
       bio,
+      email,
       expoPushToken,
       privacySettings,
       notificationPreferences,
     } = req.body;
 
+    // Basic Info
     if (firstName !== undefined) user.firstName = firstName;
     if (lastName !== undefined) user.lastName = lastName;
     if (phone !== undefined) user.phone = phone;
     if (dateOfBirth !== undefined) user.dateOfBirth = dateOfBirth;
     if (bio !== undefined) user.bio = bio;
+    if (expoPushToken !== undefined) user.expoPushToken = expoPushToken;
 
-    /* =====================================================
-       2️⃣ EMAIL UPDATE (SAFE)
-    ====================================================== */
+    // Email update logic
     if (email && email !== user.email) {
       const emailExists = await User.findOne({ email });
-      if (emailExists) {
+      if (emailExists)
         return res.status(400).json({ message: "Email already in use" });
-      }
       user.email = email;
     }
 
-    /* =====================================================
-       3️⃣ EXPO PUSH TOKEN
-    ====================================================== */
-    if (expoPushToken !== undefined) {
-      user.expoPushToken = expoPushToken;
-      console.log("📲 Expo push token updated");
-    }
-
-    /* =====================================================
-       4️⃣ PRIVACY SETTINGS
-    ====================================================== */
+    // Privacy Settings - Syncing with Schema
     if (privacySettings) {
       if (privacySettings.showNameInDonations !== undefined) {
         user.privacySettings.showNameInDonations =
           privacySettings.showNameInDonations;
       }
-
       if (privacySettings.showContactDetailsToFamily !== undefined) {
         user.privacySettings.showContactDetailsToFamily =
           privacySettings.showContactDetailsToFamily;
       }
     }
 
-    /* =====================================================
-       5️⃣ NOTIFICATION PREFERENCES
-    ====================================================== */
+    // Notification Preferences
     if (notificationPreferences) {
-      if (notificationPreferences.push?.enabled !== undefined) {
+      if (notificationPreferences.push?.enabled !== undefined)
         user.notificationPreferences.push.enabled =
           notificationPreferences.push.enabled;
-      }
-
-      if (notificationPreferences.email?.enabled !== undefined) {
+      if (notificationPreferences.email?.enabled !== undefined)
         user.notificationPreferences.email.enabled =
           notificationPreferences.email.enabled;
-      }
-
-      if (notificationPreferences.sms?.enabled !== undefined) {
+      if (notificationPreferences.sms?.enabled !== undefined)
         user.notificationPreferences.sms.enabled =
           notificationPreferences.sms.enabled;
-      }
 
       if (notificationPreferences.donationNotifications !== undefined) {
         user.notificationPreferences.donationNotifications =
           notificationPreferences.donationNotifications;
       }
-
       if (notificationPreferences.withdrawalNotifications !== undefined) {
         user.notificationPreferences.withdrawalNotifications =
           notificationPreferences.withdrawalNotifications;
       }
     }
 
-    /* =====================================================
-       6️⃣ SAVE
-    ====================================================== */
     const updatedUser = await user.save();
-
     const userResponse = updatedUser.toObject();
     delete userResponse.password;
 
-    console.log("✅ Profile updated successfully");
-
-    res.status(200).json({
-      success: true,
-      message: "Profile updated successfully",
-      user: userResponse,
-    });
+    res.status(200).json({ success: true, user: userResponse });
   } catch (error) {
     console.error("🔥 Profile Update Error:", error);
-    res.status(500).json({ message: "Server error during profile update" });
+    res.status(500).json({ message: "Server error" });
   }
 });
 

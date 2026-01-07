@@ -38,10 +38,15 @@ router.post("/", protect, async (req, res) => {
 // @route   GET /api/polls/family/:familyId
 router.get("/family/:familyId", protect, async (req, res) => {
   try {
-    const polls = await Poll.find({ familyId: req.params.familyId })
-      .populate("sender", "name profilePicture")
+    const { familyId } = req.params;
+    const currentUserId = req.user._id;
+
+    // 1. 🔹 Fetch the polls
+    const polls = await Poll.find({ familyId })
+      .populate("sender", "firstName lastName profilePicture") // Adjusted to your User schema fields
       .sort({ createdAt: -1 });
 
+    // 2. 🔹 Enrich data and identify "isNew" before updating the DB
     const enrichedPolls = polls.map((poll) => {
       const pollObj = poll.toObject();
       let totalVotes = 0;
@@ -49,28 +54,40 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
       pollObj.options.forEach((opt) => {
         totalVotes += opt.votes.length;
-        // Check if current user has voted for this option
-        const hasVoted = opt.votes.some(
-          (v) => v.toString() === req.user._id.toString()
-        );
-        if (hasVoted) userVotedOptionId = opt._id;
+        if (opt.votes.some((v) => v.toString() === currentUserId.toString())) {
+          userVotedOptionId = opt._id;
+        }
       });
 
       return {
         ...pollObj,
-        isOwner: poll.sender._id.toString() === req.user._id.toString(),
+        isOwner: poll.sender._id.toString() === currentUserId.toString(),
         totalVotes,
-        userVotedOptionId, // Null if hasn't voted
+        userVotedOptionId,
         isExpired: poll.endDate ? new Date() > new Date(poll.endDate) : false,
+        // 🔹 Check if user hasn't seen this yet
+        isNew: !poll.isRead.some((id) => id.toString() === currentUserId.toString()),
       };
     });
 
+    // 3. 🔹 Mark all polls in this family as READ for this user
+    // This clears the global unread count for the next time they call getFamily
+    await Poll.updateMany(
+      { 
+        familyId, 
+        isRead: { $ne: currentUserId } 
+      },
+      { 
+        $addToSet: { isRead: currentUserId } 
+      }
+    );
+
     res.json({ success: true, polls: enrichedPolls });
   } catch (error) {
+    console.error("❌ Poll Fetch Error:", error);
     res.status(500).json({ message: "Error fetching polls" });
   }
 });
-
 // @desc    Vote in a Poll
 // @route   PATCH /api/polls/:id/vote
 router.patch("/:id/vote", protect, async (req, res) => {

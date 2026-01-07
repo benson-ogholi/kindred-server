@@ -10,7 +10,6 @@ const News = require("../models/News");
 const { protect } = require("../middlewares/authMiddleware");
 const { createFamilyNotifications } = require("../utils/notificationHelper");
 
-
 router.post(
   "/family/:familyId",
   protect,
@@ -29,7 +28,6 @@ router.post(
           .json({ message: "Title and content are required" });
       }
 
-
       let images = [];
       if (req.files?.images) {
         for (const file of req.files.images) {
@@ -41,7 +39,6 @@ router.post(
           images.push({ url });
         }
       }
-
 
       let voiceNote = null;
       if (req.files?.voiceNote?.[0]) {
@@ -70,10 +67,10 @@ router.post(
       await news.populate("author", "firstName lastName");
 
       await createFamilyNotifications(familyId, req.user._id, {
-        type: 'NEWS_UPDATE',
-        title: 'Family Update',
+        type: "NEWS_UPDATE",
+        title: "Family Update",
         message: `New post: ${title}`,
-        relatedId: news._id
+        relatedId: news._id,
       });
 
       res.status(201).json({ news });
@@ -90,18 +87,27 @@ router.post(
 router.get("/family/:familyId", protect, async (req, res) => {
   try {
     const { familyId } = req.params;
+    const userId = req.user._id;
 
     const news = await News.find({ family: familyId })
       .populate("author", "firstName lastName")
       .sort({ createdAt: -1 });
 
-    res.status(200).json({ news });
+    const enrichedNews = news.map((item) => ({
+      ...item.toObject(),
+      isNew: !item.isRead.some((id) => id.toString() === userId.toString()),
+    }));
+
+    await News.updateMany(
+      { family: familyId, isRead: { $ne: userId } },
+      { $addToSet: { isRead: userId } }
+    );
+
+    res.status(200).json({ news: enrichedNews });
   } catch (error) {
-    console.error("Fetch news error:", error);
     res.status(500).json({ message: "Failed to fetch news" });
   }
 });
-
 
 router.put("/:newsId", protect, async (req, res) => {
   console.log("🟢 UPDATE NEWS HIT (NO MULTER)");
@@ -150,7 +156,6 @@ router.put("/:newsId", protect, async (req, res) => {
     res.status(500).json({ message: "Failed to update news" });
   }
 });
-
 
 /**
  * DELETE NEWS

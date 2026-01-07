@@ -16,6 +16,8 @@ const notificationsRoutes = require("./routes/notificationRoutes");
 const userRoutes = require("./routes/userRoutes");
 const donationsRoutes = require("./routes/donationCampaign.routes");
 const Message = require("./models/Message");
+const contentRoutes = require("./routes/familyContent");
+const { uploadToBackblaze } = require("./utils/uploadToBackblaze");
 
 require("dotenv").config();
 
@@ -43,6 +45,7 @@ app.use("/api/v1/polls", pollRoutes);
 app.use("/api/v1/notifications", notificationsRoutes);
 app.use("/api/v1/users", userRoutes);
 app.use("/api/v1/donations", donationsRoutes);
+app.use("/api/v1/family-content", contentRoutes);
 
 app.get("/", (req, res) => {
   res.send("Kindred Auth Server Running 🚀");
@@ -76,15 +79,19 @@ io.on("connection", (socket) => {
       socket.emit(
         "load_messages",
         history.map((msg) => ({
-          uuid: msg.messageUuid || msg._id.toString(),
+          uuid: msg.messageUuid,
           message: msg.message,
           senderName: msg.senderName,
           senderId: msg.senderId,
-          timestamp: msg.timestamp,
-          isRead: msg.isRead,
+          timestamp: msg.timestamp.toISOString(),
+          messageType: msg.messageType,
+          imageuri: msg.imageuri,
+          videouri: msg.videouri,
+          audioUri: msg.audioUri,
+          duration: msg.duration,
+          status: "sent",
         }))
       );
-
       // Notify the sender that their messages were read
       io.to(uuid).emit("messages_marked_read", {
         roomUuid: uuid,
@@ -99,8 +106,13 @@ io.on("connection", (socket) => {
   socket.on("get_conversations", async ({ userId }) => {
     try {
       const conversations = await Message.aggregate([
+        // 1. Filter messages involving the current user
         { $match: { $or: [{ senderId: userId }, { receiverId: userId }] } },
+
+        // 2. Sort by newest first so the group picks the latest message data
         { $sort: { timestamp: -1 } },
+
+        // 3. Group by the Room
         {
           $group: {
             _id: "$roomUuid",
@@ -108,7 +120,11 @@ io.on("connection", (socket) => {
             timestamp: { $first: "$timestamp" },
             senderName: { $first: "$senderName" },
             senderId: { $first: "$senderId" },
-            // Calculate unread count for messages where I am the receiver
+            receiverId: { $first: "$receiverId" },
+            // Grab the profile picture from the latest message
+            profilePicture: { $first: "$receiverProfilePicture" },
+
+            // 4. Calculate unreadCount: Only count if I am the receiver and isRead is false
             unreadCount: {
               $sum: {
                 $cond: [
@@ -125,11 +141,13 @@ io.on("connection", (socket) => {
             },
           },
         },
+        // 5. Final sort to keep newest conversations at the top
         { $sort: { timestamp: -1 } },
       ]);
+
       socket.emit("conversations_list", conversations);
     } catch (err) {
-      console.error("Error fetching conversations:", err);
+      console.error("❌ Error fetching conversations:", err);
     }
   });
   // --- ADD THIS INSIDE io.on("connection") ---
@@ -165,47 +183,124 @@ io.on("connection", (socket) => {
   });
 
   // 3. Send Message with Real-time Count Update
+  // Inside io.on("connection", (socket) => { ...
+
   socket.on("send_message", async (data) => {
-    const { uuid, message, fullName, userId, receiverId, messageUuid } = data;
+    const {
+      uuid: roomUuid,
+      message: textMessage,
+      fullName: senderName,
+      userId: senderId,
+      receiverId,
+      messageUuid,
+      messageType = "text",
+      mediaUri: base64Media, // Client still sends in mediaUri (base64)
+      duration = 0,
+      receiverProfilePicture = "",
+    } = data;
+
+    if (!roomUuid || !senderId || !receiverId || !messageUuid) {
+      return socket.emit("error", { message: "Missing required fields" });
+    }
 
     try {
+      let imageuri = "";
+      let videouri = "";
+      let audioUri = "";
+
+      // Upload only if it's media and base64 is provided
+      if (base64Media && messageType !== "text") {
+        const base64Data = base64Media.split(";base64,").pop();
+        const fileBuffer = Buffer.from(base64Data, "base64");
+
+        const extensionMap = {
+          image: "jpg",
+          video: "mp4",
+          voice: "m4a",
+        };
+        const extension = extensionMap[messageType] || "bin";
+        const fileName = `${messageType}s/${messageUuid}.${extension}`;
+
+        const uploadedUrl = await uploadToBackblaze(
+          fileBuffer,
+          fileName,
+          "chat_attachments"
+        );
+
+        // Assign to the correct field
+        if (messageType === "image") imageuri = uploadedUrl;
+        if (messageType === "video") videouri = uploadedUrl;
+        if (messageType === "voice") audioUri = uploadedUrl;
+
+        console.log(`Uploaded ${messageType}: ${uploadedUrl}`);
+      }
+
+      // Save message with separate fields
       const newMessage = new Message({
-        roomUuid: uuid,
-        message,
-        senderName: fullName,
-        senderId: userId,
+        roomUuid,
+        message: textMessage || getDefaultMessage(messageType),
+        senderName,
+        senderId,
         receiverId,
-        messageUuid: messageUuid || uuid,
-        isRead: false,
+        messageUuid,
+        messageType,
+        imageuri,
+        videouri,
+        audioUri,
+        duration,
+        receiverProfilePicture,
         timestamp: new Date(),
+        isRead: false,
       });
+
       await newMessage.save();
 
-      // Emit the message to the room
-      io.to(uuid).emit("receive_message", {
-        uuid: messageUuid || newMessage._id.toString(),
-        message,
-        senderName: fullName,
-        senderId: userId,
-        timestamp: newMessage.timestamp,
-      });
+      // Send back to clients with separate fields
+      const messageToSend = {
+        uuid: messageUuid,
+        message: newMessage.message,
+        senderName: newMessage.senderName,
+        senderId: newMessage.senderId,
+        timestamp: newMessage.timestamp.toISOString(),
+        messageType: newMessage.messageType,
+        imageuri: newMessage.imageuri,
+        videouri: newMessage.videouri,
+        audioUri: newMessage.audioUri,
+        duration: newMessage.duration,
+      };
 
-      // Fetch the new total unread count for the receiver globally
-      const globalUnreadCount = await Message.countDocuments({
-        receiverId: receiverId,
+      io.to(roomUuid).emit("receive_message", messageToSend);
+
+      // Update unread count
+      const unreadCount = await Message.countDocuments({
+        receiverId,
         isRead: false,
       });
 
-      // Send a notification to the receiver's private channel
-      io.emit(`unread_update_${receiverId}`, {
-        roomUuid: uuid,
-        totalUnread: globalUnreadCount,
-        lastMessage: message,
+      io.to(roomUuid).emit("unread_update", {
+        roomUuid,
+        unreadCount,
+        lastMessage: newMessage.message,
       });
     } catch (err) {
-      console.error("❌ Error saving message:", err);
+      console.error("Error sending message:", err);
+      socket.emit("message_error", { messageUuid, error: "Failed to send" });
     }
   });
+
+  // Helper for default text
+  function getDefaultMessage(type) {
+    switch (type) {
+      case "image":
+        return "Photo";
+      case "video":
+        return "Video";
+      case "voice":
+        return "Voice Note";
+      default:
+        return "Message";
+    }
+  }
 
   socket.on("disconnect", () => {
     console.log("❌ User Disconnected");

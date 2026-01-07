@@ -17,18 +17,21 @@ const pollSchema = new mongoose.Schema(
     options: [
       {
         text: { type: String, required: true },
-        votes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Track WHO voted
+        votes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
       },
     ],
-    readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // <-- NEW
+    isRead: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Standardized
     endDate: { type: Date },
-    status: {
-      type: String,
-      enum: ["active", "closed"],
-      default: "active",
-    },
+    status: { type: String, enum: ["active", "closed"], default: "active" },
   },
   { timestamps: true }
 );
+
+pollSchema.pre("save", function (next) {
+  if (this.isNew && !this.isRead.includes(this.sender)) {
+    this.isRead.push(this.sender);
+  }
+  next();
+});
 
 module.exports = mongoose.model("Poll", pollSchema);

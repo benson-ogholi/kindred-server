@@ -7,20 +7,10 @@ const taskSchema = new mongoose.Schema(
       ref: "Family",
       required: true,
     },
-    title: {
-      type: String,
-      required: [true, "Task title is required"],
-    },
-    details: {
-      type: String,
-    },
-    deadline: {
-      type: Date,
-    },
-    assignedTo: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-    },
+    title: { type: String, required: true },
+    details: { type: String },
+    deadline: { type: Date },
+    assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -31,9 +21,16 @@ const taskSchema = new mongoose.Schema(
       enum: ["pending", "in-progress", "completed"],
       default: "pending",
     },
-    readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // <-- NEW
+    isRead: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Standardized
   },
   { timestamps: true }
 );
+
+taskSchema.pre("save", function (next) {
+  if (this.isNew && !this.isRead.includes(this.createdBy)) {
+    this.isRead.push(this.createdBy);
+  }
+  next();
+});
 
 module.exports = mongoose.model("Task", taskSchema);

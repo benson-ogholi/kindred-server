@@ -11,6 +11,7 @@ const Poll = require("../models/Poll");
 const Suggestion = require("../models/Suggestion");
 const Report = require("../models/Report");
 const News = require("../models/News");
+const FamilyContent = require("../models/FamilyContent");
 
 // 1. CREATE A FAMILY
 router.post("/", protect, async (req, res) => {
@@ -29,8 +30,8 @@ router.post("/", protect, async (req, res) => {
     });
 
     const populatedFamily = await Family.findById(newFamily._id)
-      .populate("owner", "firstName lastName email")
-      .populate("members", "firstName lastName email");
+      .populate("owner", "firstName lastName email profilePicture")
+      .populate("members", "firstName lastName email profilePicture");
 
     res
       .status(201)
@@ -47,8 +48,8 @@ router.get("/", protect, async (req, res) => {
     const families = await Family.find({
       $or: [{ owner: req.user._id }, { members: req.user._id }],
     })
-      .populate("owner", "firstName lastName email")
-      .populate("members", "firstName lastName email")
+      .populate("owner", "firstName lastName email profilePicture")
+      .populate("members", "firstName lastName email profilePicture")
       .sort({ createdAt: -1 });
 
     const familiesWithFlags = families.map((f) => {
@@ -69,38 +70,111 @@ router.get("/", protect, async (req, res) => {
   }
 });
 
+// 3. GET SINGLE FAMILY BY ID (WITH UNREAD COUNTS)
 router.get("/:id", protect, async (req, res) => {
   try {
-    const currentUserId = req.user._id.toString();
+    const currentUserId = req.user._id;
+    const currentUserIdStr = currentUserId.toString();
 
     const familyDoc = await Family.findById(req.params.id)
-      .populate("owner", "firstName lastName email")
-      .populate("members", "firstName lastName email");
+      .populate("owner", "firstName lastName email profilePicture")
+      .populate("members", "firstName lastName email profilePicture");
 
     if (!familyDoc) {
       return res.status(404).json({ message: "Family not found" });
     }
 
-    const isOwner = familyDoc.owner._id.toString() === currentUserId;
+    // 1. 🔹 Permissions
+    const isOwner = familyDoc.owner._id.toString() === currentUserIdStr;
     const isMember = familyDoc.members.some(
-      (m) => m._id.toString() === currentUserId
+      (m) => m._id.toString() === currentUserIdStr
     );
-
     const isInviteSent =
-      familyDoc.pendingInvites?.some((id) => id.toString() === currentUserId) ||
-      false;
-
+      familyDoc.pendingInvites?.some(
+        (id) => id.toString() === currentUserIdStr
+      ) || false;
     const isJoinRequestSent =
-      familyDoc.joinRequests?.some((id) => id.toString() === currentUserId) ||
-      false;
+      familyDoc.joinRequests?.some(
+        (id) => id.toString() === currentUserIdStr
+      ) || false;
 
-    // --- Prepare members with UUID and unread counts ---
+    // 2. 🔹 Global Feature Unread Counts (For the current user across the whole family)
+    // We run these in parallel for maximum speed
+    const [
+      globalTasks,
+      globalPolls,
+      globalSuggestions,
+      globalReports,
+      globalNews,
+    ] = await Promise.all([
+      Task.countDocuments({
+        family: familyDoc._id,
+        isRead: { $ne: currentUserId },
+      }),
+      Poll.countDocuments({
+        familyId: familyDoc._id,
+        isRead: { $ne: currentUserId },
+        status: "active",
+      }),
+      Suggestion.countDocuments({
+        familyId: familyDoc._id,
+        isRead: { $ne: currentUserId },
+      }),
+      Report.countDocuments({
+        familyId: familyDoc._id,
+        isRead: { $ne: currentUserId },
+      }),
+      News.countDocuments({
+        family: familyDoc._id,
+        isRead: { $ne: currentUserId },
+      }),
+    ]);
+
+    // 3. 🔹 FamilyContent Type Counts (History, Village Tradition, etc.)
+    const contentUnreadData = await FamilyContent.aggregate([
+      {
+        $match: {
+          familyId: familyDoc._id,
+          isRead: { $ne: currentUserId },
+        },
+      },
+      {
+        $group: {
+          _id: "$contentType",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const contentUnreadMap = contentUnreadData.reduce((acc, curr) => {
+      acc[curr._id] = curr.count;
+      return acc;
+    }, {});
+
+    const allContentTypes = [
+      "Family Tree",
+      "History",
+      "Village Tradition",
+      "Language Lesson",
+      "King",
+      "Patriarch",
+      "Resolution",
+      "My Village",
+      "Suggestion Box",
+    ];
+
+    const contentStatus = allContentTypes.map((type) => ({
+      type,
+      unreadCount: contentUnreadMap[type] || 0,
+      hasUnread: (contentUnreadMap[type] || 0) > 0,
+    }));
+
+    // 4. 🔹 Prepare members (Personal unread counts for chat/tasks)
     const membersWithUUIDAndUnreadCounts = await Promise.all(
       (familyDoc.members || []).map(async (member) => {
         const memberId = member._id.toString();
 
-        // Skip self
-        if (memberId === currentUserId) {
+        if (memberId === currentUserIdStr) {
           return {
             ...member.toObject(),
             uuid: null,
@@ -114,8 +188,7 @@ router.get("/:id", protect, async (req, res) => {
           };
         }
 
-        // 🔹 Unified UUID logic
-        const usersPair = [currentUserId, memberId].sort();
+        const usersPair = [currentUserIdStr, memberId].sort();
         let unified = await UnifiedIds.findOne({
           users: { $size: 2, $all: usersPair },
         });
@@ -127,55 +200,42 @@ router.get("/:id", protect, async (req, res) => {
           });
         }
 
-        // 🔹 Count unread items for current viewer
-        const tasksCount = await Task.countDocuments({
-          family: familyDoc._id,
-          assignedTo: memberId,
-          status: { $ne: "completed" },
-          readBy: { $ne: currentUserId },
-        });
-
-        const pollsCount = await Poll.countDocuments({
-          familyId: familyDoc._id,
-          "options.votes": { $ne: currentUserId },
-          status: "active",
-        });
-
-        const suggestionsCount = await Suggestion.countDocuments({
-          familyId: familyDoc._id,
-          upvotes: { $ne: currentUserId },
-          status: "pending",
-        });
-
-        const reportsCount = await Report.countDocuments({
-          familyId: familyDoc._id,
-          sharedWith: memberId,
-          status: { $ne: "Completed" },
-          readBy: { $ne: currentUserId },
-        });
-
-        const newsCount = await News.countDocuments({
-          family: familyDoc._id,
-          author: { $ne: currentUserId },
-          readBy: { $ne: currentUserId },
-        });
+        // Member-specific logic (e.g. tasks assigned specifically to THEM that YOU haven't read)
+        const [mTasks, mReports] = await Promise.all([
+          Task.countDocuments({
+            family: familyDoc._id,
+            assignedTo: memberId,
+            isRead: { $ne: currentUserId },
+          }),
+          Report.countDocuments({
+            familyId: familyDoc._id,
+            sender: memberId,
+            isRead: { $ne: currentUserId },
+          }),
+        ]);
 
         return {
           ...member.toObject(),
           uuid: unified.unifiedId,
-          unreadCounts: {
-            tasks: tasksCount,
-            polls: pollsCount,
-            suggestions: suggestionsCount,
-            reports: reportsCount,
-            news: newsCount,
-          },
+          unreadCounts: { tasks: mTasks, reports: mReports },
         };
       })
     );
 
+    // 5. 🔹 Final Response Assembly
     const family = familyDoc.toObject();
     family.members = membersWithUUIDAndUnreadCounts;
+
+    // Add global feature counts to the main family object
+    family.unreadSummary = {
+      tasks: globalTasks,
+      polls: globalPolls,
+      suggestions: globalSuggestions,
+      reports: globalReports,
+      news: globalNews,
+    };
+
+    family.contentStatus = contentStatus;
     family.isMember = isMember;
     family.isNotMember = !(isOwner || isMember);
     family.isInviteSent = isInviteSent;
@@ -187,19 +247,18 @@ router.get("/:id", protect, async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Fetch family error:", error);
-    res.status(500).json({
-      message: "Server error fetching family details",
-    });
+    res.status(500).json({ message: "Server error fetching family details" });
   }
 });
+
 // 4. LOOKUP FAMILY BY INVITE CODE
 router.get("/invite/:inviteCode", protect, async (req, res) => {
   try {
     const familyDoc = await Family.findOne({
       inviteCode: req.params.inviteCode.toUpperCase(),
     })
-      .populate("owner", "firstName lastName email")
-      .populate("members", "firstName lastName email");
+      .populate("owner", "firstName lastName email profilePicture")
+      .populate("members", "firstName lastName email profilePicture");
 
     if (!familyDoc)
       return res.status(404).json({ message: "Invalid invite code" });
@@ -236,8 +295,8 @@ router.put("/:id", protect, async (req, res) => {
       req.body,
       { new: true }
     )
-      .populate("owner", "firstName lastName email")
-      .populate("members", "firstName lastName email");
+      .populate("owner", "firstName lastName email profilePicture")
+      .populate("members", "firstName lastName email profilePicture");
 
     res.status(200).json({ message: "Updated", family: updatedFamily });
   } catch (error) {
@@ -368,7 +427,7 @@ router.get("/:familyId/requests", protect, async (req, res) => {
   try {
     const family = await Family.findById(req.params.familyId).populate(
       "joinRequests",
-      "firstName lastName email"
+      "firstName lastName email profilePicture"
     );
     if (!family || family.owner.toString() !== req.user._id.toString())
       return res.status(403).json({ message: "Unauthorized" });
@@ -437,7 +496,7 @@ router.post(
 router.put("/:familyId/members", protect, async (req, res) => {
   try {
     const { familyId } = req.params;
-    const { userIds } = req.body; // ARRAY OF USER IDS
+    const { userIds } = req.body;
 
     if (!Array.isArray(userIds)) {
       return res.status(400).json({ message: "userIds must be an array" });
@@ -448,28 +507,23 @@ router.put("/:familyId/members", protect, async (req, res) => {
       return res.status(404).json({ message: "Family not found" });
     }
 
-    // ✅ Only owner can update members
     if (family.owner.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: "Unauthorized" });
     }
 
-    // ✅ Ensure owner is always included
     const uniqueUserIds = new Set(userIds.map((id) => id.toString()));
     uniqueUserIds.add(family.owner.toString());
 
     const finalUserIds = Array.from(uniqueUserIds);
 
-    // ✅ Validate users exist
     const users = await User.find({ _id: { $in: finalUserIds } }).select("_id");
 
     if (users.length !== finalUserIds.length) {
       return res.status(400).json({ message: "One or more users not found" });
     }
 
-    // ✅ Replace members array completely
     family.members = users.map((u) => u._id);
 
-    // Optional: clean pending invites & join requests
     family.pendingInvites = family.pendingInvites?.filter((id) =>
       finalUserIds.includes(id.toString())
     );
@@ -479,7 +533,6 @@ router.put("/:familyId/members", protect, async (req, res) => {
 
     await family.save();
 
-    // 🔔 Notify updated members
     await createFamilyNotifications(familyId, req.user._id, {
       type: "MEMBER_JOINED",
       title: "Family Members Updated",
@@ -488,8 +541,8 @@ router.put("/:familyId/members", protect, async (req, res) => {
     });
 
     const populatedFamily = await Family.findById(familyId)
-      .populate("owner", "firstName lastName email")
-      .populate("members", "firstName lastName email");
+      .populate("owner", "firstName lastName email profilePicture")
+      .populate("members", "firstName lastName email profilePicture");
 
     res.status(200).json({
       message: "Family members updated successfully",
