@@ -30,6 +30,7 @@ const notificationSchema = new mongoose.Schema(
         "DONATION_UPDATED", // Added for edits
         "DONATION_DELETED", // Added for removals
         "FAMILY_JOIN_REQUEST",
+        "FAMILY_JOIN_DECLINED"
       ],
     },
     title: {

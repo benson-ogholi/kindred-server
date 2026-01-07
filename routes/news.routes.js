@@ -81,9 +81,7 @@ router.post(
   }
 );
 
-/**
- * GET ALL NEWS FOR A FAMILY
- */
+
 router.get("/family/:familyId", protect, async (req, res) => {
   try {
     const { familyId } = req.params;
