@@ -26,11 +26,14 @@ const reportSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-reportSchema.pre("save", function (next) {
-  if (this.isNew && !this.isRead.includes(this.sender)) {
+reportSchema.pre("save", function () {
+  if (!this.isRead) {
+    this.isRead = [];
+  }
+
+  if (this.isNew && !this.isRead.some(id => id.toString() === this.sender.toString())) {
     this.isRead.push(this.sender);
   }
-  next();
 });
 
 module.exports = mongoose.model("Report", reportSchema);

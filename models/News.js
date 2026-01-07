@@ -24,11 +24,13 @@ const NewsSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-NewsSchema.pre("save", function (next) {
-  if (this.isNew && !this.isRead.includes(this.author)) {
-    this.isRead.push(this.author);
+NewsSchema.pre("save", function () {
+  if (!this.isRead) {
+    this.isRead = [];
   }
-  next();
-});
 
+  if (this.isNew && !this.isRead.some(id => id.toString() === this.sender.toString())) {
+    this.isRead.push(this.sender);
+  }
+});
 module.exports = mongoose.model("News", NewsSchema);

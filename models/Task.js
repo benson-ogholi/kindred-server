@@ -26,11 +26,14 @@ const taskSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-taskSchema.pre("save", function (next) {
-  if (this.isNew && !this.isRead.includes(this.createdBy)) {
-    this.isRead.push(this.createdBy);
+taskSchema.pre("save", function () {
+  if (!this.isRead) {
+    this.isRead = [];
   }
-  next();
+
+  if (this.isNew && !this.isRead.some(id => id.toString() === this.sender.toString())) {
+    this.isRead.push(this.sender);
+  }
 });
 
 module.exports = mongoose.model("Task", taskSchema);

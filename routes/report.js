@@ -6,6 +6,9 @@ const { createFamilyNotifications } = require("../utils/notificationHelper");
 
 router.post("/", protect, async (req, res) => {
   try {
+    console.log("📥 Incoming report request body:", req.body);
+    console.log("👤 Authenticated user:", req.user);
+
     const {
       familyId,
       reportName,
@@ -17,9 +20,12 @@ router.post("/", protect, async (req, res) => {
       sharedWith,
     } = req.body;
 
+    console.log("🆔 familyId:", familyId);
+    console.log("📄 reportName:", reportName);
+
     const report = await Report.create({
       familyId,
-      sender: req.user._id, // Set from auth middleware
+      sender: req.user._id,
       reportName,
       expectations,
       workDone,
@@ -29,6 +35,9 @@ router.post("/", protect, async (req, res) => {
       sharedWith,
     });
 
+    console.log("✅ Report created:", report._id);
+
+    console.log("🔔 Creating family notification...");
     await createFamilyNotifications(familyId, req.user._id, {
       type: "REPORT_SUBMITTED",
       title: "Progress Report Update",
@@ -36,10 +45,17 @@ router.post("/", protect, async (req, res) => {
       relatedId: report._id,
     });
 
-    res.status(201).json({ success: true, report });
+    console.log("✅ Family notification created");
+
+    res.status(201).json({
+      success: true,
+      report,
+    });
   } catch (error) {
+    console.error("❌ Error creating report:", error);
     res.status(400).json({ message: error.message });
   }
+
 });
 
 // @desc    Get all reports for a family (with isOwner toggle)
