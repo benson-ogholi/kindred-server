@@ -5,16 +5,14 @@ const reportSchema = new mongoose.Schema(
     familyId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Family",
-      required: true,
     },
     sender: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
     },
-    reportName: { type: String, required: true },
+    reportName: { type: String },
     expectations: { type: String },
-    workDone: { type: String, required: true },
+    workDone: { type: String },
     status: {
       type: String,
       enum: ["In Progress", "Review", "Completed"],

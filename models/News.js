@@ -13,10 +13,10 @@ const NewsSchema = new mongoose.Schema(
       required: true,
     },
     title: { type: String, required: true, trim: true },
-    content: { type: String, required: true, trim: true },
+    content: { type: String,  trim: true },
     isRead: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Standardized
     images: [
-      { url: { type: String, required: true }, publicId: { type: String } },
+      { url: { type: String, }, publicId: { type: String } },
     ],
     voiceNote: { url: { type: String }, duration: { type: Number } },
     createdAt: { type: Date, default: Date.now },
