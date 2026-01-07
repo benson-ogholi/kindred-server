@@ -61,14 +61,14 @@ const FamilyContentSchema = new mongoose.Schema(
  * Automatically adds the creator to the isRead array when a new
  * document is created so they don't see their own post as "unread".
  */
-FamilyContentSchema.pre("save", function (next) {
-  if (this.isNew) {
-    // Only push if it's not already there (safety check)
-    if (!this.isRead.includes(this.creator)) {
-      this.isRead.push(this.creator);
-    }
+FamilyContentSchema.pre("save", function () {
+  if (!this.isRead) {
+    this.isRead = [];
   }
-  next();
+
+  if (this.isNew && !this.isRead.some(id => id.toString() === this.sender.toString())) {
+    this.isRead.push(this.sender);
+  }
 });
 
 module.exports = mongoose.model("FamilyContent", FamilyContentSchema);
