@@ -23,6 +23,14 @@ router.post("/", protect, async (req, res) => {
     console.log("🆔 familyId:", familyId);
     console.log("📄 reportName:", reportName);
 
+    const normalizedSharedWith = Array.isArray(sharedWith)
+      ? sharedWith
+      : [sharedWith];
+
+    const filteredSharedWith = normalizedSharedWith.filter(
+      (id) => id.toString() !== req.user._id.toString() // remove owner
+    );
+
     const report = await Report.create({
       familyId,
       sender: req.user._id,
@@ -31,8 +39,8 @@ router.post("/", protect, async (req, res) => {
       workDone,
       status,
       completionPercentage,
-      proofLinks,
-      sharedWith,
+      proofLinks: proofLinks || [],
+      sharedWith: filteredSharedWith, // ✅ this is what gets saved
     });
 
     console.log("✅ Report created:", report._id);
@@ -55,7 +63,6 @@ router.post("/", protect, async (req, res) => {
     console.error("❌ Error creating report:", error);
     res.status(400).json({ message: error.message });
   }
-
 });
 
 // @desc    Get all reports for a family (with isOwner toggle)
@@ -73,12 +80,16 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
     const enrichedReports = reports.map((report) => {
       const reportObj = report.toObject();
-      const isReadArray = Array.isArray(reportObj.isRead) ? reportObj.isRead : [];
+      const isReadArray = Array.isArray(reportObj.isRead)
+        ? reportObj.isRead
+        : [];
 
       return {
         ...reportObj,
         isOwner: reportObj.sender?._id?.toString() === userId.toString(),
-        isNew: !isReadArray.some(id => id && id.toString() === userId.toString())
+        isNew: !isReadArray.some(
+          (id) => id && id.toString() === userId.toString()
+        ),
       };
     });
 
