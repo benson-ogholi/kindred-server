@@ -8,68 +8,133 @@ const FamilyContentSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+
     creator: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
     },
-    // The array of user IDs who have read this content
+
     isRead: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "User",
       },
     ],
+
     contentType: {
       type: String,
       enum: [
         "Family Tree",
-        "History",
+        "Family History",
+        "Village Story",
         "Village Tradition",
         "Language Lesson",
         "King",
         "Patriarch",
         "Resolution",
-        "My Village",
         "Suggestion Box",
+        "My Village"
       ],
       required: true,
     },
-    title: { type: String, required: true },
-    description: { type: String },
+
+    // ===== Common Fields =====
+    title: {
+      type: String, // Resolution Topic
+    },
+
+    description: {
+      type: String, // Brief Details
+    },
+
     images: [
       {
         url: { type: String },
       },
     ],
-    voiceNote: {
-      url: { type: String },
-      duration: { type: Number },
+
+    videoUrl: {
+      type: String,
     },
+
+    // ===== Metadata =====
     metadata: {
+      /**
+       * ===== Family Resolution =====
+       */
+      deadline: {
+        type: String,
+      },
+      inCareOf: {
+        type: String, // Person or group responsible
+      },
+      resolutionStatus: {
+        type: String,
+        enum: ["Pending", "In Progress", "Completed", "Cancelled"],
+        default: "Pending",
+      },
+
+      /**
+       * ===== Leaders / Patriarch =====
+       */
       role: { type: String },
-      dateOccurred: { type: Date },
-      lessonLevel: { type: String },
-      parentMemberId: { type: String },
+      startYear: { type: Number },
+      endYear: { type: Number },
+      currentlyServing: { type: Boolean, default: false },
+
+      /**
+       * ===== Family History / Stories =====
+       */
+      significance: { type: String },
+
+      /**
+       * ===== Traditions =====
+       */
+      traditionType: { type: String },
+
+      /**
+       * ===== Language Lessons =====
+       */
+      lessonCategory: { type: String },
+
+      /**
+       * ===== Family Tree =====
+       */
+      fullName: { type: String },
+      yearOfBirth: { type: Number },
+      yearOfDeath: { type: Number },
+      gender: {
+        type: String,
+        enum: ["Male", "Female", "Other"],
+      },
+      relationshipType: { type: String },
+      currentlyLiving: { type: Boolean, default: true },
+      spouseName: { type: String },
+      maidenName: { type: String },
+      placeOfBirth: { type: String },
+      placeOfDeath: { type: String },
+      occupation: { type: String },
+      parentName: { type: String },
+      birthOrder: { type: Number },
+      additionalNotes: { type: String },
     },
   },
   { timestamps: true }
 );
 
 /**
- * Pre-save Middleware
- * Automatically adds the creator to the isRead array when a new
- * document is created so they don't see their own post as "unread".
+ * Auto mark creator as read
  */
-FamilyContentSchema.pre("save", async function () {
-  if (!this.isRead?.length) {
-    this.isRead = [];
-  }
+FamilyContentSchema.pre("save", function () {
+  if (!this.isRead) this.isRead = [];
 
   if (this.isNew && this.creator) {
-    if (!this.isRead.find(id => id.toString() === this.creator.toString())) {
-      this.isRead.push(this.creator);
-    }
+    const exists = this.isRead.some(
+      id => id.toString() === this.creator.toString()
+    );
+    if (!exists) this.isRead.push(this.creator);
   }
 });
+
 module.exports = mongoose.model("FamilyContent", FamilyContentSchema);
