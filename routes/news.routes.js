@@ -19,30 +19,32 @@ router.post(
   ]),
   async (req, res) => {
     try {
-      const { title, content } = req.body;
+      const { title, content = "" } = req.body;
       const { familyId } = req.params;
 
-      if (!title || !content) {
-        return res
-          .status(400)
-          .json({ message: "Title and content are required" });
+      if (!title) {
+        return res.status(400).json({ message: "Title is required" });
       }
 
+      // ===== Images =====
       let images = [];
-      if (req.files?.images) {
+      if (req.files?.images?.length) {
         for (const file of req.files.images) {
           const url = await uploadToBackblaze(
             file.buffer,
             file.originalname,
             "news/images"
           );
+
           images.push({ url });
         }
       }
 
-      let voiceNote = null;
+      // ===== Voice Note =====
+      let voiceNote;
       if (req.files?.voiceNote?.[0]) {
         const audioFile = req.files.voiceNote[0];
+
         const audioUrl = await uploadToBackblaze(
           audioFile.buffer,
           audioFile.originalname,
@@ -51,8 +53,15 @@ router.post(
 
         voiceNote = {
           url: audioUrl,
-          duration: Number(req.body.voiceDuration) || null,
+          duration: Number(req.body.voiceDuration) || undefined,
         };
+      }
+
+      // Ensure at least content or voice note exists
+      if (!content && !voiceNote) {
+        return res.status(400).json({
+          message: "Either content or a voice note is required",
+        });
       }
 
       const news = await News.create({

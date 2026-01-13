@@ -185,6 +185,72 @@ io.on("connection", (socket) => {
   // 3. Send Message with Real-time Count Update
   // Inside io.on("connection", (socket) => { ...
 
+  socket.on(
+    "edit_message",
+    async ({ uuid, messageUuid, newMessage, userId }) => {
+      try {
+        const msg = await Message.findOne({ messageUuid, senderId: userId });
+        if (!msg) {
+          return socket.emit("error", {
+            message: "Message not found or not yours",
+          });
+        }
+
+        const msgTime = new Date(msg.timestamp).getTime();
+        const now = Date.now();
+        if ((now - msgTime) / 60000 > 5) {
+          return socket.emit("error", {
+            message: "Edit time expired (5 minutes only)",
+          });
+        }
+
+        msg.message = newMessage.trim();
+        await msg.save();
+
+        io.to(uuid).emit("message_edited", {
+          uuid: messageUuid,
+          newMessage: msg.message,
+        });
+      } catch (err) {
+        console.error("Edit failed:", err);
+        socket.emit("error", { message: "Failed to edit message" });
+      }
+    }
+  );
+
+  // Delete Message
+  socket.on(
+    "delete_message",
+    async ({ uuid, messageUuid, userId, forEveryone }) => {
+      try {
+        const msg = await Message.findOne({ messageUuid });
+        if (!msg) {
+          return socket.emit("error", { message: "Message not found" });
+        }
+
+        const msgTime = new Date(msg.timestamp).getTime();
+        const now = Date.now();
+        if ((now - msgTime) / 60000 > 5) {
+          return socket.emit("error", {
+            message: "Delete time expired (5 minutes only)",
+          });
+        }
+
+        if (forEveryone) {
+          // Delete from database → everyone sees it gone
+          await Message.deleteOne({ messageUuid });
+          io.to(uuid).emit("message_deleted", { uuid: messageUuid });
+        } else {
+          // Only sender removes it from their view
+          socket.emit("message_deleted", { uuid: messageUuid });
+        }
+      } catch (err) {
+        console.error("Delete failed:", err);
+        socket.emit("error", { message: "Failed to delete message" });
+      }
+    }
+  );
+
   socket.on("send_message", async (data) => {
     const {
       uuid: roomUuid,

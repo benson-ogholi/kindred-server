@@ -13,12 +13,13 @@ const NewsSchema = new mongoose.Schema(
       required: true,
     },
     title: { type: String, required: true, trim: true },
-    content: { type: String,  trim: true },
+    content: { type: String, trim: true },
     isRead: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Standardized
-    images: [
-      { url: { type: String, }, publicId: { type: String } },
-    ],
-    voiceNote: { url: { type: String }, duration: { type: Number } },
+    images: [{ url: { type: String }, publicId: { type: String } }],
+    voiceNote: {
+      url: { type: String },
+      duration: { type: Number }, // seconds
+    },
     createdAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
@@ -29,7 +30,10 @@ NewsSchema.pre("save", function () {
     this.isRead = [];
   }
 
-  if (this.isNew && !this.isRead.some(id => id.toString() === this.sender.toString())) {
+  if (
+    this.isNew &&
+    !this.isRead.some((id) => id.toString() === this.sender.toString())
+  ) {
     this.isRead.push(this.sender);
   }
 });
