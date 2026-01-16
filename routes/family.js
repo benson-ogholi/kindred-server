@@ -44,28 +44,69 @@ router.post("/", protect, async (req, res) => {
 // 2. GET ALL USER'S FAMILIES
 router.get("/", protect, async (req, res) => {
   try {
-    const userId = req.user._id.toString();
+    const userId = req.user._id;
+    const userIdStr = userId.toString();
+
     const families = await Family.find({
-      $or: [{ owner: req.user._id }, { members: req.user._id }],
+      $or: [{ owner: userId }, { members: userId }],
     })
       .populate("owner", "firstName lastName email profilePicture")
       .populate("members", "firstName lastName email profilePicture")
       .sort({ createdAt: -1 });
 
-    const familiesWithFlags = families.map((f) => {
-      const family = f.toObject();
-      const isOwner = family.owner._id.toString() === userId;
-      const isMember = family.members.some((m) => m._id.toString() === userId);
-      return {
-        ...family,
-        isOwner,
-        isMember,
-        isNotMember: !(isOwner || isMember),
-      };
-    });
+    const familiesWithFlagsAndUnread = await Promise.all(
+      families.map(async (f) => {
+        const family = f.toObject();
 
-    res.status(200).json(familiesWithFlags);
+        const isOwner = family.owner._id.toString() === userIdStr;
+        const isMember = family.members.some(
+          (m) => m._id.toString() === userIdStr
+        );
+
+        // 🔹 Unread counts PER FAMILY (same logic as /:id)
+        const [tasks, polls, suggestions, reports, news] = await Promise.all([
+          Task.countDocuments({
+            family: family._id,
+            isRead: { $ne: userId },
+          }),
+          Poll.countDocuments({
+            familyId: family._id,
+            isRead: { $ne: userId },
+            status: "active",
+          }),
+          Suggestion.countDocuments({
+            familyId: family._id,
+            isRead: { $ne: userId },
+          }),
+          Report.countDocuments({
+            familyId: family._id,
+            isRead: { $ne: userId },
+          }),
+          News.countDocuments({
+            family: family._id,
+            isRead: { $ne: userId },
+          }),
+        ]);
+
+        return {
+          ...family,
+          isOwner,
+          isMember,
+          isNotMember: !(isOwner || isMember),
+          unreadSummary: {
+            tasks,
+            polls,
+            suggestions,
+            reports,
+            news,
+          },
+        };
+      })
+    );
+
+    res.status(200).json(familiesWithFlagsAndUnread);
   } catch (error) {
+    console.error("❌ Fetch families error:", error);
     res.status(500).json({ message: "Server error fetching families" });
   }
 });
