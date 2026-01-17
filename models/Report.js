@@ -1,6 +1,5 @@
 const mongoose = require("mongoose");
 
-
 const commentSchema = new mongoose.Schema(
   {
     user: {
@@ -17,8 +16,6 @@ const commentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-
-
 const reportSchema = new mongoose.Schema(
   {
     familyId: {
@@ -34,7 +31,14 @@ const reportSchema = new mongoose.Schema(
     workDone: { type: String },
     status: {
       type: String,
-      enum: ["In Progress", "Review", "Completed"],
+      enum: [
+        "In Progress",
+        "Review",
+        "Completed",
+        "Blocked",
+        "Under Review",
+        "On Hold",
+      ],
       default: "In Progress",
     },
     comments: [commentSchema],
@@ -51,7 +55,10 @@ reportSchema.pre("save", function () {
     this.isRead = [];
   }
 
-  if (this.isNew && !this.isRead.some(id => id.toString() === this.sender.toString())) {
+  if (
+    this.isNew &&
+    !this.isRead.some((id) => id.toString() === this.sender.toString())
+  ) {
     this.isRead.push(this.sender);
   }
 });
