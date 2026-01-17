@@ -4,6 +4,52 @@ const Report = require("../models/Report");
 const { protect } = require("../middlewares/authMiddleware"); // Assuming you have auth middleware
 const { createFamilyNotifications } = require("../utils/notificationHelper");
 
+router.put("/reports-comments", protect, async (req, res) => {
+  try {
+    const { message, reportId } = req.body;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ message: "Comment message is required" });
+    }
+
+    const report = await Report.findById(reportId);
+
+    if (!report) {
+      return res.status(404).json({ message: "Report not found" });
+    }
+
+    const comment = {
+      user: req.user._id,
+      message,
+    };
+
+    report.comments.push(comment);
+
+    // Mark report as unread for others
+    report.isRead = report.isRead.filter(
+      (id) => id.toString() === req.user._id.toString()
+    );
+
+    await report.save();
+
+    // 🔔 Optional notification
+    await createFamilyNotifications(report.familyId, req.user._id, {
+      type: "REPORT_COMMENT",
+      title: "New Report Comment",
+      message: `${req.user.firstName} commented on a report`,
+      relatedId: report._id,
+    });
+
+    res.status(201).json({
+      success: true,
+      comment: report.comments[report.comments.length - 1],
+    });
+  } catch (error) {
+    console.error("❌ Add comment error:", error);
+    res.status(500).json({ message: "Failed to add comment" });
+  }
+});
+
 router.post("/", protect, async (req, res) => {
   try {
     console.log("📥 Incoming report request body:", req.body);
@@ -154,6 +200,52 @@ router.delete("/:id", protect, async (req, res) => {
     res.json({ success: true, message: "Report removed" });
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+});
+
+// routes/family.js
+router.put("/:familyId/members/:userId/rights", protect, async (req, res) => {
+  try {
+    const { familyId, userId } = req.params;
+    const rightsUpdates = req.body;
+
+    const family = await Family.findById(familyId);
+    if (!family) return res.status(404).json({ message: "Family not found" });
+
+    // Fix: Safely compare owner IDs
+    const isOwner = family.owner.some(
+      (o) => o.toString() === req.user._id.toString()
+    );
+    if (!isOwner) return res.status(403).json({ message: "Unauthorized" });
+
+    // Fix: Safely find member even if m.user is populated or null
+    const member = family.members.find((m) => {
+      if (!m.user) return false;
+      const mId = m.user._id ? m.user._id.toString() : m.user.toString();
+      return mId === userId.toString();
+    });
+
+    if (!member) return res.status(404).json({ message: "Member not found" });
+
+    // Implementation for all granular rights
+    if (rightsUpdates) {
+      Object.keys(rightsUpdates).forEach((key) => {
+        // This handles: canPostNews, canManageMembers, isAdmin, etc.
+        member.rights.set(key, !!rightsUpdates[key]);
+      });
+
+      // Also update the top-level role if passed
+      if (rightsUpdates.role) member.role = rightsUpdates.role;
+      if (rightsUpdates.restrictionReason !== undefined) {
+        member.restrictionReason = rightsUpdates.restrictionReason;
+      }
+    }
+
+    await family.save();
+    res.status(200).json({ message: "Rights updated", member });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server Error" });
   }
 });
 

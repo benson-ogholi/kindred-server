@@ -6,7 +6,6 @@ const { uploadToBackblaze } = require("../utils/uploadToBackblaze");
 const multer = require("multer"); // <-- This is required for upload
 const upload = multer({ storage: multer.memoryStorage() });
 
-
 router.get("/profile", protect, async (req, res) => {
   try {
     // req.user._id is provided by the protect middleware
@@ -177,16 +176,41 @@ router.get("/:id", protect, async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
+    const showContact =
+      user.privacySettings?.showContactDetailsToFamily !== false;
+
+    // Build safe response manually
+    const safeUser = {
+      _id: user._id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      bio: user.bio,
+      profilePicture: user.profilePicture,
+      isVerified: user.isVerified,
+
+      // Only include contact details if allowed
+      ...(showContact && {
+        email: user.email,
+        phone: user.phone,
+        dateOfBirth: user.dateOfBirth,
+      }),
+
+      privacySettings: user.privacySettings,
+      notificationPreferences: user.notificationPreferences,
+      savedFamilies: user.savedFamilies,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    };
+
     res.json({
       success: true,
-      user,
+      user: safeUser,
     });
   } catch (error) {
     console.error("🔥 Fetch User Error:", error);
     res.status(500).json({ message: "Server error fetching user details" });
   }
 });
-
 // Update Expo Push Token
 router.patch("/push-token", protect, async (req, res) => {
   try {

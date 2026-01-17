@@ -34,7 +34,9 @@ const FamilyContentSchema = new mongoose.Schema(
         "Patriarch",
         "Resolution",
         "Suggestion Box",
-        "My Village"
+        "My Village",
+        "Key Date",
+        "Task", 
       ],
       required: true,
     },
@@ -61,63 +63,83 @@ const FamilyContentSchema = new mongoose.Schema(
     // ===== Metadata =====
     metadata: {
       /**
-       * ===== Family Resolution =====
+       * ===== KEY DATES =====
        */
-      deadline: {
+      eventDate: {
+        type: Date, // dd/mm/yyyy → stored as ISO
+      },
+      place: {
+        type: String, // Lagos, Nigeria
+      },
+      visibility: {
         type: String,
+        enum: ["private", "family"],
+        default: "family",
       },
-      inCareOf: {
-        type: String, // Person or group responsible
-      },
+
+      /**
+       * ===== EXISTING METADATA =====
+       */
+      deadline: String,
+      inCareOf: String,
       resolutionStatus: {
         type: String,
         enum: ["Pending", "In Progress", "Completed", "Cancelled"],
         default: "Pending",
       },
 
-      /**
-       * ===== Leaders / Patriarch =====
-       */
-      role: { type: String },
-      startYear: { type: Number },
-      endYear: { type: Number },
+      role: String,
+      startYear: Number,
+      endYear: Number,
       currentlyServing: { type: Boolean, default: false },
 
-      /**
-       * ===== Family History / Stories =====
-       */
-      significance: { type: String },
+      significance: String,
+      traditionType: String,
+      lessonCategory: String,
 
-      /**
-       * ===== Traditions =====
-       */
-      traditionType: { type: String },
-
-      /**
-       * ===== Language Lessons =====
-       */
-      lessonCategory: { type: String },
-
-      /**
-       * ===== Family Tree =====
-       */
-      fullName: { type: String },
-      yearOfBirth: { type: Number },
-      yearOfDeath: { type: Number },
+      fullName: String,
+      yearOfBirth: Number,
+      yearOfDeath: Number,
       gender: {
         type: String,
         enum: ["Male", "Female", "Other"],
       },
-      relationshipType: { type: String },
+      relationshipType: String,
       currentlyLiving: { type: Boolean, default: true },
-      spouseName: { type: String },
-      maidenName: { type: String },
-      placeOfBirth: { type: String },
-      placeOfDeath: { type: String },
-      occupation: { type: String },
-      parentName: { type: String },
-      birthOrder: { type: Number },
-      additionalNotes: { type: String },
+      spouseName: String,
+      maidenName: String,
+      placeOfBirth: String,
+      placeOfDeath: String,
+      occupation: String,
+      parentName: String,
+      birthOrder: Number,
+      additionalNotes: String,
+
+
+      taskStatus: {
+        type: String,
+        enum: ["Pending", "Completed", "Cancelled"],
+        default: "Pending",
+      },
+    
+      visibility: {
+        type: String,
+        enum: ["private", "family"],
+        default: "private", // ✅ tasks are private by default
+      },
+    
+      /**
+       * ===== EXISTING METADATA (unchanged) =====
+       */
+      eventDate: Date,
+      place: String,
+      deadline: String,
+      inCareOf: String,
+      resolutionStatus: {
+        type: String,
+        enum: ["Pending", "In Progress", "Completed", "Cancelled"],
+        default: "Pending",
+      },
     },
   },
   { timestamps: true }
@@ -131,7 +153,7 @@ FamilyContentSchema.pre("save", function () {
 
   if (this.isNew && this.creator) {
     const exists = this.isRead.some(
-      id => id.toString() === this.creator.toString()
+      (id) => id.toString() === this.creator.toString()
     );
     if (!exists) this.isRead.push(this.creator);
   }

@@ -161,27 +161,85 @@ router.post("/resend-otp", async (req, res) => {
 });
 
 // LOGIN
+// LOGIN - Updated to help frontend redirect unverified users
 router.post("/login", async (req, res) => {
+  console.log("➡️ LOGIN REQUEST RECEIVED");
+  console.log("Request body:", req.body);
+
   try {
     let { email, password } = req.body;
-    email = email.trim().toLowerCase();
 
+    email = email?.trim().toLowerCase();
+    console.log("Normalized email:", email);
+
+    // 1. Find user
     const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ message: "Invalid credentials" });
+    console.log("User found:", user ? user._id : null);
 
-    if (!user.isVerified) {
-      return res
-        .status(400)
-        .json({ message: "Please verify your email first" });
+    if (!user) {
+      console.warn("❌ User not found");
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
+    // 2. Check password
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch)
+    console.log("Password match:", isMatch);
+
+    if (!isMatch) {
+      console.warn("❌ Password mismatch");
       return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    // 3. Check verification
+    console.log("User verified status:", user.isVerified);
+
+    if (!user.isVerified) {
+      console.warn("⚠️ User not verified, generating OTP");
+
+      const otp = generateOtp();
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+      console.log("Generated OTP:", otp);
+      console.log("OTP expires at:", expiresAt);
+
+      await Otp.findOneAndUpdate(
+        { email, purpose: "verify" },
+        { otp, expiresAt, purpose: "verify" },
+        { upsert: true }
+      );
+
+      console.log("OTP saved/updated in DB");
+
+      try {
+        await sendEmail(
+          email,
+          "Verify Your Account",
+          `Your code is: ${otp}`,
+          "verification"
+        );
+        console.log("📧 Verification email sent");
+      } catch (e) {
+        console.error("❌ Email sending failed:", e);
+      }
+
+      console.log("Returning 202 - account not verified");
+
+      return res.status(202).json({
+        message: "Account not verified",
+        isVerified: false,
+        email: user.email,
+      });
+    }
+
+    // 4. Successful login
+    console.log("✅ User verified, generating token");
 
     const token = generateToken(user._id);
-    res.json({
+    console.log("JWT generated");
+
+    const responsePayload = {
       message: "Login successful",
+      isVerified: true,
       token,
       user: {
         id: user._id,
@@ -189,12 +247,16 @@ router.post("/login", async (req, res) => {
         firstName: user.firstName,
         lastName: user.lastName,
       },
-    });
+    };
+
+    console.log("Login response payload:", responsePayload);
+
+    return res.json(responsePayload);
   } catch (error) {
-    res.status(500).json({ message: "Server error" });
+    console.error("🔥 LOGIN ERROR:", error);
+    return res.status(500).json({ message: "Server error" });
   }
 });
-
 // FORGOT PASSWORD
 router.post("/forgot-password", async (req, res) => {
   try {
@@ -229,7 +291,6 @@ router.post("/forgot-password", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
 
 router.post("/reset-password", async (req, res) => {
   try {

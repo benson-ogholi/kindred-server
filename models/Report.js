@@ -1,5 +1,24 @@
 const mongoose = require("mongoose");
 
+
+const commentSchema = new mongoose.Schema(
+  {
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    message: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+  },
+  { timestamps: true }
+);
+
+
+
 const reportSchema = new mongoose.Schema(
   {
     familyId: {
@@ -18,6 +37,7 @@ const reportSchema = new mongoose.Schema(
       enum: ["In Progress", "Review", "Completed"],
       default: "In Progress",
     },
+    comments: [commentSchema],
     isRead: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Standardized
     completionPercentage: { type: Number, min: 0, max: 100, default: 0 },
     proofLinks: [{ type: String }],

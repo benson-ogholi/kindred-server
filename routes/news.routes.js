@@ -126,6 +126,8 @@ router.get("/family/:familyId", protect, async (req, res) => {
   }
 });
 
+
+
 router.put("/:newsId", protect, async (req, res) => {
   console.log("🟢 UPDATE NEWS HIT (NO MULTER)");
 

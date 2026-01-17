@@ -18,6 +18,7 @@ const donationsRoutes = require("./routes/donationCampaign.routes");
 const Message = require("./models/Message");
 const contentRoutes = require("./routes/familyContent");
 const { uploadToBackblaze } = require("./utils/uploadToBackblaze");
+const familyMembers = require("./routes/familyMembers");
 
 require("dotenv").config();
 
@@ -46,7 +47,7 @@ app.use("/api/v1/notifications", notificationsRoutes);
 app.use("/api/v1/users", userRoutes);
 app.use("/api/v1/donations", donationsRoutes);
 app.use("/api/v1/family-content", contentRoutes);
-
+app.use("/api/v1/family-members", familyMembers);
 app.get("/", (req, res) => {
   res.send("Kindred Auth Server Running 🚀");
 });
@@ -100,6 +101,33 @@ io.on("connection", (socket) => {
     } catch (err) {
       console.error("❌ Error joining room:", err);
     }
+  });
+
+  // Inside io.on("connection", (socket) => { ... })
+
+  // ─── TYPING INDICATOR ────────────────────────────────────────
+  socket.on("typing", (data) => {
+    const { uuid, fullName } = data;
+    if (!uuid) return;
+
+    // Broadcast to everyone in the room (except sender)
+    socket.to(uuid).emit("user_typing", {
+      roomUuid: uuid,
+      userId: socket.id, // or use real userId if you prefer
+      name: fullName || "Someone",
+      isTyping: true,
+    });
+  });
+
+  socket.on("stop_typing", (data) => {
+    const { uuid } = data;
+    if (!uuid) return;
+
+    socket.to(uuid).emit("user_typing", {
+      roomUuid: uuid,
+      userId: socket.id,
+      isTyping: false,
+    });
   });
 
   // 2. Get Conversations with Unread Counts

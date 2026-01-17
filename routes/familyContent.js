@@ -8,25 +8,31 @@ const multer = require("multer"); // <-- This is required for upload
 const { uploadToBackblaze } = require("../utils/uploadToBackblaze");
 
 // Memory storage to keep files in buffer (needed for Backblaze upload)
-const upload = multer({ storage: multer.memoryStorage() });
+// const upload = multer({ storage: multer.memoryStorage() });
+
+
+// ===============================
+// Multer (NO LIMITS ON IMAGES)
+// ===============================
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB per file
+  },
+});
 
 // ===============================
 // CREATE FAMILY CONTENT
 // ===============================
-// @route   POST /api/family-content
-// @access  Private
-// ===============================
 router.post(
   "/",
   protect,
-  // ADD THIS MIDDLEWARE HERE TOO!
-  upload.fields([
-    { name: "images", maxCount: 5 },
-    { name: "voiceNote", maxCount: 1 },
-  ]),
+  upload.any(), // 🔥 accept ALL file fields safely
   async (req, res) => {
     try {
-      // Now req.body will NOT be undefined
+      console.log("📥 BODY:", req.body);
+      console.log("📁 FILES:", req.files?.map(f => f.fieldname));
+
       const {
         familyId,
         contentType,
@@ -36,67 +42,101 @@ router.post(
         metadata,
       } = req.body;
 
-      if (!familyId) {
-        return res.status(400).json({ message: "familyId is required" });
+      if (!familyId || !contentType) {
+        return res.status(400).json({
+          message: "familyId and contentType are required",
+        });
       }
 
-      // 1. Handle Multiple Image Uploads
-      let images = [];
-      if (req.files?.images) {
-        for (const file of req.files.images) {
+      // ===============================
+      // FILE PROCESSING
+      // ===============================
+      const images = [];
+      let voiceNote = null;
+
+      for (const file of req.files || []) {
+        // ---- Images (UNLIMITED)
+        if (file.mimetype.startsWith("image/")) {
           const url = await uploadToBackblaze(
             file.buffer,
             file.originalname,
             `family-content/${contentType}/images`
           );
-          images.push({ url });
+
+          images.push({
+            url,
+            name: file.originalname,
+            type: file.mimetype,
+          });
+        }
+
+        // ---- Voice Note
+        if (file.mimetype.startsWith("audio/")) {
+          const audioUrl = await uploadToBackblaze(
+            file.buffer,
+            file.originalname,
+            `family-content/${contentType}/voice-notes`
+          );
+
+          voiceNote = {
+            url: audioUrl,
+            duration: voiceDuration ? Number(voiceDuration) : null,
+            type: file.mimetype,
+          };
         }
       }
 
-      // 2. Handle Voice Note Upload
-      let voiceNote = null;
-      if (req.files?.voiceNote?.[0]) {
-        const audioFile = req.files.voiceNote[0];
-        const audioUrl = await uploadToBackblaze(
-          audioFile.buffer,
-          audioFile.originalname,
-          `family-content/${contentType}/voice-notes`
-        );
-
-        voiceNote = {
-          url: audioUrl,
-          duration: Number(voiceDuration) || null,
-        };
+      // ===============================
+      // SAFE METADATA PARSING
+      // ===============================
+      let parsedMetadata = {};
+      if (metadata) {
+        try {
+          parsedMetadata = JSON.parse(metadata);
+        } catch {
+          parsedMetadata = {};
+        }
       }
 
-      // 3. Create content
+      // ===============================
+      // CREATE CONTENT
+      // ===============================
       const content = await FamilyContent.create({
         familyId,
         contentType,
         title,
         description,
-        images, // store the array of URLs
+        images,
         voiceNote,
-        metadata: metadata ? JSON.parse(metadata) : {},
+        metadata: parsedMetadata,
         creator: req.user._id,
       });
 
-      // 4. Get family name for notification
+      // ===============================
+      // NOTIFICATION
+      // ===============================
       const family = await Family.findById(familyId).select("familyName");
 
       if (family) {
         await createFamilyNotifications(familyId, req.user._id, {
           type: "FAMILY_UPDATE",
           title: `${family.familyName} Updates`,
-          message: `${title || "New content"} (${contentType})`,
+          message: title
+            ? title
+            : `New ${contentType} content added`,
           relatedId: content._id,
         });
       }
 
-      res.status(201).json({ success: true, content });
+      res.status(201).json({
+        success: true,
+        content,
+      });
     } catch (error) {
-      console.error("Create Error:", error);
-      res.status(500).json({ message: error.message });
+      console.error("❌ Create Family Content Error:", error);
+      res.status(500).json({
+        message: "Failed to create family content",
+      });
     }
   }
 );
@@ -111,28 +151,39 @@ router.get("/family/:familyId/:type", protect, async (req, res) => {
     const { familyId, type } = req.params;
     const currentUserId = req.user._id;
 
-    // 1. Fetch contents
+    // ===============================
+    // 🔐 VISIBILITY-AWARE QUERY
+    // ===============================
     const contents = await FamilyContent.find({
-      familyId: familyId,
+      familyId,
       contentType: type,
+      $or: [
+        // 1️⃣ Family-visible content (everyone sees)
+        { "metadata.visibility": "family" },
+
+        // 2️⃣ Private content ONLY if user is creator
+        {
+          "metadata.visibility": "private",
+          creator: currentUserId,
+        },
+      ],
     })
       .populate("creator", "firstName lastName profilePicture")
       .sort({ createdAt: -1 });
 
-    // 2. Map and enrich
+    // ===============================
+    // ENRICH RESPONSE
+    // ===============================
     const enriched = contents.map((item) => {
       const itemObj = item.toObject();
 
-      // Ensure isRead is always an array
       const isReadArray = Array.isArray(itemObj.isRead) ? itemObj.isRead : [];
 
-      // Check if current user has read it
       const isNewForUser = !isReadArray.some(
-        (id) => id && id.toString() === currentUserId.toString()
+        (id) => id?.toString() === currentUserId.toString()
       );
 
-      // Safely get creator ID
-      const creatorId = itemObj.creator?._id?.toString() || null;
+      const creatorId = itemObj.creator?._id?.toString();
 
       return {
         ...itemObj,
@@ -141,11 +192,12 @@ router.get("/family/:familyId/:type", protect, async (req, res) => {
       };
     });
 
-    // 3. Update read status for current user
+    // ===============================
+    // MARK AS READ (ONLY VISIBLE ITEMS)
+    // ===============================
     await FamilyContent.updateMany(
       {
-        familyId: familyId,
-        contentType: type,
+        _id: { $in: contents.map((c) => c._id) },
         isRead: { $ne: currentUserId },
       },
       { $addToSet: { isRead: currentUserId } }
@@ -160,7 +212,6 @@ router.get("/family/:familyId/:type", protect, async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
-
 // ===============================
 // UPDATE CONTENT
 // ===============================

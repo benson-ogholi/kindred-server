@@ -12,6 +12,7 @@ const Suggestion = require("../models/Suggestion");
 const Report = require("../models/Report");
 const News = require("../models/News");
 const FamilyContent = require("../models/FamilyContent");
+const sendInviteEmail = require("../utils/sendInviteEmail");
 
 // 1. CREATE A FAMILY
 router.post("/", protect, async (req, res) => {
@@ -44,69 +45,28 @@ router.post("/", protect, async (req, res) => {
 // 2. GET ALL USER'S FAMILIES
 router.get("/", protect, async (req, res) => {
   try {
-    const userId = req.user._id;
-    const userIdStr = userId.toString();
-
+    const userId = req.user._id.toString();
     const families = await Family.find({
-      $or: [{ owner: userId }, { members: userId }],
+      $or: [{ owner: req.user._id }, { members: req.user._id }],
     })
       .populate("owner", "firstName lastName email profilePicture")
       .populate("members", "firstName lastName email profilePicture")
       .sort({ createdAt: -1 });
 
-    const familiesWithFlagsAndUnread = await Promise.all(
-      families.map(async (f) => {
-        const family = f.toObject();
+    const familiesWithFlags = families.map((f) => {
+      const family = f.toObject();
+      const isOwner = family.owner._id.toString() === userId;
+      const isMember = family.members.some((m) => m._id.toString() === userId);
+      return {
+        ...family,
+        isOwner,
+        isMember,
+        isNotMember: !(isOwner || isMember),
+      };
+    });
 
-        const isOwner = family.owner._id.toString() === userIdStr;
-        const isMember = family.members.some(
-          (m) => m._id.toString() === userIdStr
-        );
-
-        // 🔹 Unread counts PER FAMILY (same logic as /:id)
-        const [tasks, polls, suggestions, reports, news] = await Promise.all([
-          Task.countDocuments({
-            family: family._id,
-            isRead: { $ne: userId },
-          }),
-          Poll.countDocuments({
-            familyId: family._id,
-            isRead: { $ne: userId },
-            status: "active",
-          }),
-          Suggestion.countDocuments({
-            familyId: family._id,
-            isRead: { $ne: userId },
-          }),
-          Report.countDocuments({
-            familyId: family._id,
-            isRead: { $ne: userId },
-          }),
-          News.countDocuments({
-            family: family._id,
-            isRead: { $ne: userId },
-          }),
-        ]);
-
-        return {
-          ...family,
-          isOwner,
-          isMember,
-          isNotMember: !(isOwner || isMember),
-          unreadSummary: {
-            tasks,
-            polls,
-            suggestions,
-            reports,
-            news,
-          },
-        };
-      })
-    );
-
-    res.status(200).json(familiesWithFlagsAndUnread);
+    res.status(200).json(familiesWithFlags);
   } catch (error) {
-    console.error("❌ Fetch families error:", error);
     res.status(500).json({ message: "Server error fetching families" });
   }
 });
@@ -355,6 +315,118 @@ router.delete("/:id", protect, async (req, res) => {
     res.status(200).json({ message: "Family deleted" });
   } catch (error) {
     res.status(500).json({ message: "Server error deleting family" });
+  }
+});
+
+router.post("/new-invite/send", protect, async (req, res) => {
+  console.log("📩 INVITE ROUTE HIT");
+  console.log("➡️ Request body:", req.body);
+  console.log("👤 Inviter:", req.user?._id);
+
+  try {
+    const { emails, familyId } = req.body;
+
+    if (!emails) {
+      console.log("❌ No emails provided");
+      return res.status(400).json({ message: "Email(s) required" });
+    }
+
+    const emailList = Array.isArray(emails) ? emails : [emails];
+    console.log("📨 Email list:", emailList);
+
+    const family = await Family.findById(familyId);
+    console.log("🏠 Family found:", family?._id);
+
+    if (!family) {
+      console.log("❌ Family not found:", familyId);
+      return res.status(404).json({ message: "Family not found" });
+    }
+
+    // 🔐 Only owner can invite
+    if (String(family.owner) !== String(req.user._id)) {
+      console.log("🚫 Unauthorized invite attempt by:", req.user._id);
+      return res.status(403).json({ message: "Unauthorized" });
+    }
+
+    const results = [];
+
+    for (const email of emailList) {
+      console.log("➡️ Processing email:", email);
+
+      const normalizedEmail = email.toLowerCase().trim();
+      console.log("🔤 Normalized email:", normalizedEmail);
+
+      const user = await User.findOne({ email: normalizedEmail });
+      console.log("👤 User lookup result:", user?._id || "NON-USER");
+
+      // 🧍 EXISTING USER
+      if (user) {
+        const alreadyMember = family.members.some(
+          (id) => id.toString() === user._id.toString()
+        );
+
+        const alreadyInvited = family.pendingInvites?.some(
+          (id) => id.toString() === user._id.toString()
+        );
+
+        console.log("👥 Already member:", alreadyMember);
+        console.log("📨 Already invited:", alreadyInvited);
+
+        if (alreadyMember || alreadyInvited) {
+          console.log("⚠️ Skipping user, already involved:", normalizedEmail);
+          results.push({
+            email: normalizedEmail,
+            status: "already-invited",
+          });
+          continue;
+        }
+
+        // ➕ Add to pending invites
+        family.pendingInvites.push(user._id);
+        console.log("➕ Added to pendingInvites:", user._id);
+
+        // 🔔 CREATE IN-APP NOTIFICATION
+        console.log("🔔 Creating in-app notification for user:", user._id);
+        await createFamilyNotifications(familyId, req.user._id, {
+          type: "FAMILY_INVITE",
+          title: "Family Invitation",
+          message: `You were invited to join "${family.familyName}"`,
+          relatedId: familyId,
+          receiver: user._id,
+        });
+        console.log("✅ Notification created");
+      }
+
+      // 📧 SEND EMAIL (USER OR NON-USER)
+      console.log("📧 Sending invite email to:", normalizedEmail);
+      await sendInviteEmail({
+        to: normalizedEmail,
+        familyName: family.familyName,
+        inviterName: `${req.user.firstName} ${req.user.lastName}`,
+        inviteCode: family.inviteCode,
+      });
+      console.log("✅ Email sent to:", normalizedEmail);
+
+      results.push({
+        email: normalizedEmail,
+        status: user ? "invite-sent-user" : "invite-sent-non-user",
+      });
+    }
+
+    console.log("💾 Saving family with updated pendingInvites");
+    await family.save();
+    console.log("✅ Family saved");
+
+    console.log("📤 Final response results:", results);
+
+    res.status(200).json({
+      message: "Invites processed successfully",
+      results,
+    });
+  } catch (error) {
+    console.error("❌ Invite route crashed");
+    console.error(error);
+    res.status(500).json({ message: "Server error sending invites" });
   }
 });
 
