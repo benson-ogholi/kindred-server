@@ -21,7 +21,15 @@ const FamilyContentSchema = new mongoose.Schema(
         ref: "User",
       },
     ],
-
+    // Social Logic
+    likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    comments: [
+      {
+        user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        text: { type: String },
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
     contentType: {
       type: String,
       enum: [
@@ -36,18 +44,20 @@ const FamilyContentSchema = new mongoose.Schema(
         "Suggestion Box",
         "My Village",
         "Key Date",
-        "Task", 
+        "Task",
+
+        "History",
       ],
       required: true,
     },
 
     // ===== Common Fields =====
     title: {
-      type: String, // Resolution Topic
+      type: String,
     },
 
     description: {
-      type: String, // Brief Details
+      type: String,
     },
 
     images: [
@@ -62,29 +72,30 @@ const FamilyContentSchema = new mongoose.Schema(
 
     // ===== Metadata =====
     metadata: {
-      /**
-       * ===== KEY DATES =====
-       */
       eventDate: {
-        type: Date, // dd/mm/yyyy → stored as ISO
+        type: Date,
       },
       place: {
-        type: String, // Lagos, Nigeria
+        type: String,
       },
+      deadline: {
+        type: String,
+      },
+
       visibility: {
         type: String,
-        enum: ["private", "family"],
+        enum: ["private", "family", "personal", "public"],
         default: "family",
       },
 
-      /**
-       * ===== EXISTING METADATA =====
-       */
-      deadline: String,
-      inCareOf: String,
       resolutionStatus: {
         type: String,
         enum: ["Pending", "In Progress", "Completed", "Cancelled"],
+        default: "Pending",
+      },
+      taskStatus: {
+        type: String,
+        enum: ["Pending", "Completed", "Cancelled"],
         default: "Pending",
       },
 
@@ -92,10 +103,10 @@ const FamilyContentSchema = new mongoose.Schema(
       startYear: Number,
       endYear: Number,
       currentlyServing: { type: Boolean, default: false },
-
       significance: String,
       traditionType: String,
       lessonCategory: String,
+      inCareOf: String,
 
       fullName: String,
       yearOfBirth: Number,
@@ -114,32 +125,6 @@ const FamilyContentSchema = new mongoose.Schema(
       parentName: String,
       birthOrder: Number,
       additionalNotes: String,
-
-
-      taskStatus: {
-        type: String,
-        enum: ["Pending", "Completed", "Cancelled"],
-        default: "Pending",
-      },
-    
-      visibility: {
-        type: String,
-        enum: ["private", "family"],
-        default: "private", // ✅ tasks are private by default
-      },
-    
-      /**
-       * ===== EXISTING METADATA (unchanged) =====
-       */
-      eventDate: Date,
-      place: String,
-      deadline: String,
-      inCareOf: String,
-      resolutionStatus: {
-        type: String,
-        enum: ["Pending", "In Progress", "Completed", "Cancelled"],
-        default: "Pending",
-      },
     },
   },
   { timestamps: true }
@@ -147,16 +132,20 @@ const FamilyContentSchema = new mongoose.Schema(
 
 /**
  * Auto mark creator as read
+ * FIX: Removed 'next' and used async to prevent "next is not a function"
  */
-FamilyContentSchema.pre("save", function () {
+FamilyContentSchema.pre("save", async function () {
   if (!this.isRead) this.isRead = [];
 
   if (this.isNew && this.creator) {
     const exists = this.isRead.some(
       (id) => id.toString() === this.creator.toString()
     );
-    if (!exists) this.isRead.push(this.creator);
+    if (!exists) {
+      this.isRead.push(this.creator);
+    }
   }
+  // With async hooks, you don't need next()
 });
 
 module.exports = mongoose.model("FamilyContent", FamilyContentSchema);

@@ -34,23 +34,18 @@ const FamilyMemberSchema = new mongoose.Schema(
         isModerator: false,
       }),
     },
-    joinedAt: {
-      type: Date,
-      default: Date.now,
-    },
+    joinedAt: { type: Date, default: Date.now },
     status: {
       type: String,
       enum: ["active", "suspended", "left"],
       default: "active",
     },
-    restrictionReason: {
-      type: String,
-    },
+    restrictionReason: { type: String },
   },
   { timestamps: true }
 );
 
-// Optional: prevent duplicate user-family entries
+// prevent duplicate user-family entries
 FamilyMemberSchema.index({ family: 1, user: 1 }, { unique: true });
 
 module.exports = mongoose.model("FamilyMember", FamilyMemberSchema);

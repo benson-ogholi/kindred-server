@@ -24,6 +24,130 @@ const upload = multer({
 // ===============================
 // CREATE FAMILY CONTENT
 // ===============================
+// ===============================
+// LIKE / UNLIKE CONTENT
+// ===============================
+// @route   POST /api/family-content/:id/like
+// @access  Private
+router.post("/content-content/:id/like", protect, async (req, res) => {
+  try {
+    const content = await FamilyContent.findById(req.params.id);
+
+    if (!content) {
+      return res.status(404).json({ message: "Content not found" });
+    }
+
+    // Check if content already liked by user
+    const isLiked = content.likes.some(
+      (id) => id.toString() === req.user._id.toString()
+    );
+
+    if (isLiked) {
+      // Unlike: Remove user ID from likes array
+      content.likes = content.likes.filter(
+        (id) => id.toString() !== req.user._id.toString()
+      );
+    } else {
+      // Like: Add user ID to likes array
+      content.likes.push(req.user._id);
+    }
+
+    await content.save();
+
+    res.json({
+      success: true,
+      likesCount: content.likes.length,
+      isLiked: !isLiked,
+    });
+  } catch (error) {
+    console.error("❌ Like Content Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ===============================
+// ADD COMMENT
+// ===============================
+// @route   POST /api/family-content/:id/comment
+// @access  Private
+router.post("/content-content/:id/comment", protect, async (req, res) => {
+  try {
+    const { text } = req.body;
+
+    if (!text) {
+      return res.status(400).json({ message: "Comment text is required" });
+    }
+
+    const content = await FamilyContent.findById(req.params.id);
+
+    if (!content) {
+      return res.status(404).json({ message: "Content not found" });
+    }
+
+    const newComment = {
+      user: req.user._id,
+      text,
+      createdAt: new Date(),
+    };
+
+    content.comments.push(newComment);
+    await content.save();
+
+    // Populate user info for the last added comment to return it to UI
+    const populatedContent = await FamilyContent.findById(content._id).populate(
+      "comments.user",
+      "firstName lastName profilePicture"
+    );
+
+    res.status(201).json({
+      success: true,
+      comment: populatedContent.comments[populatedContent.comments.length - 1],
+    });
+  } catch (error) {
+    console.error("❌ Add Comment Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ===============================
+// DELETE COMMENT
+// ===============================
+// @route   DELETE /api/family-content/:id/comment/:commentId
+// @access  Private
+router.delete("/content-content/:id/comment/:commentId", protect, async (req, res) => {
+  try {
+    const content = await FamilyContent.findById(req.params.id);
+
+    if (!content) {
+      return res.status(404).json({ message: "Content not found" });
+    }
+
+    // Find comment
+    const comment = content.comments.id(req.params.commentId);
+
+    if (!comment) {
+      return res.status(404).json({ message: "Comment not found" });
+    }
+
+    // Check authorization (only comment creator or content creator can delete)
+    if (
+      comment.user.toString() !== req.user._id.toString() &&
+      content.creator.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({ message: "Not authorized to delete this comment" });
+    }
+
+    comment.remove();
+    await content.save();
+
+    res.json({ success: true, message: "Comment removed" });
+  } catch (error) {
+    console.error("❌ Delete Comment Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+
 router.post(
   "/",
   protect,

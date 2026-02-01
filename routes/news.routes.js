@@ -10,6 +10,105 @@ const News = require("../models/News");
 const { protect } = require("../middlewares/authMiddleware");
 const { createFamilyNotifications } = require("../utils/notificationHelper");
 
+/**
+ * LIKE / UNLIKE NEWS
+ */
+router.post("/news-news/:newsId/like", protect, async (req, res) => {
+  try {
+    const news = await News.findById(req.params.newsId);
+    if (!news) return res.status(404).json({ message: "News not found" });
+
+    const isLiked = news.likes.includes(req.user._id);
+
+    if (isLiked) {
+      // Unlike
+      news.likes = news.likes.filter(
+        (id) => id.toString() !== req.user._id.toString()
+      );
+    } else {
+      // Like
+      news.likes.push(req.user._id);
+    }
+
+    await news.save();
+    res.status(200).json({ likes: news.likes, isLiked: !isLiked });
+  } catch (error) {
+    res.status(500).json({ message: "Error processing like" });
+  }
+});
+
+/**
+ * ADD COMMENT
+ */
+// Add 'protect' here
+router.post("/news-news/:newsId/comment", protect, async (req, res) => {
+  try {
+    const { text } = req.body;
+
+    // 1. Check if user exists (Safety check)
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ message: "Not authorized, user missing" });
+    }
+
+    if (!text)
+      return res.status(400).json({ message: "Comment text is required" });
+
+    const news = await News.findById(req.params.newsId);
+    if (!news) return res.status(404).json({ message: "News not found" });
+
+    // 2. Create the comment object using the now-available req.user._id
+    const newComment = {
+      author: req.user._id,
+      text,
+    };
+
+    news.comments.push(newComment);
+    await news.save();
+
+    // 3. Re-fetch and populate so the frontend gets the author's name immediately
+    const updatedNews = await News.findById(req.params.newsId).populate(
+      "comments.author",
+      "firstName lastName"
+    );
+
+    const addedComment = updatedNews.comments[updatedNews.comments.length - 1];
+
+    res.status(201).json({ comment: addedComment });
+  } catch (error) {
+    console.error("❌ Add Comment Error:", error);
+    res.status(500).json({ message: "Failed to add comment" });
+  }
+});
+/**
+ * DELETE COMMENT
+ */
+router.delete("/news-news/:newsId/comment/:commentId", async (req, res) => {
+  try {
+    const news = await News.findById(req.params.newsId);
+    if (!news) return res.status(404).json({ message: "News not found" });
+
+    const comment = news.comments.id(req.params.commentId);
+    if (!comment) return res.status(404).json({ message: "Comment not found" });
+
+    // Only comment author or news author can delete
+    if (
+      comment.author.toString() !== req.user._id.toString() &&
+      news.author.toString() !== req.user._id.toString()
+    ) {
+      return res
+        .status(403)
+        .json({ message: "Not authorized to delete this comment" });
+    }
+
+    comment.deleteOne();
+    await news.save();
+
+    res.status(200).json({ message: "Comment deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to delete comment" });
+  }
+});
+
 router.post(
   "/family/:familyId",
   protect,
@@ -97,36 +196,40 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
     const news = await News.find({ family: familyId })
       .populate("author", "firstName lastName")
+      .populate("comments.author", "firstName lastName") // ✅ populate comment authors
       .sort({ createdAt: -1 });
 
     const enrichedNews = news.map((item) => {
-      const itemObj = item.toObject();
+      const obj = item.toObject();
 
-      // Safely handle isRead
-      const isReadArray = Array.isArray(itemObj.isRead) ? itemObj.isRead : [];
+      const isReadArray = Array.isArray(obj.isRead) ? obj.isRead : [];
 
       return {
-        ...itemObj,
+        ...obj,
         isNew: !isReadArray.some(
           (id) => id && id.toString() === userId.toString()
         ),
       };
     });
 
-    // Mark all as read for current user
+    // ✅ Mark all as read
     await News.updateMany(
       { family: familyId, isRead: { $ne: userId } },
       { $addToSet: { isRead: userId } }
     );
 
-    res.status(200).json({ news: enrichedNews });
+    return res.status(200).json({
+      status: "success",
+      news: enrichedNews,
+    });
   } catch (error) {
     console.error("❌ Fetch News Error:", error);
-    res.status(500).json({ message: "Failed to fetch news" });
+    return res.status(500).json({
+      status: "error",
+      message: "Failed to fetch news",
+    });
   }
 });
-
-
 
 router.put("/:newsId", protect, async (req, res) => {
   console.log("🟢 UPDATE NEWS HIT (NO MULTER)");

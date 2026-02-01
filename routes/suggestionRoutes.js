@@ -10,12 +10,12 @@ const { createFamilyNotifications } = require("../utils/notificationHelper");
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
+// @desc    Create a new suggestion
 router.post("/", protect, upload.single("image"), async (req, res) => {
   try {
     const { title, description, familyId } = req.body;
     let imageUrl = null;
 
-    // Handle Image Upload if file exists
     if (req.file) {
       imageUrl = await uploadToBackblaze(
         req.file.buffer,
@@ -41,13 +41,45 @@ router.post("/", protect, upload.single("image"), async (req, res) => {
 
     res.status(201).json({ success: true, suggestion });
   } catch (error) {
-    console.error(error);
     res
       .status(500)
       .json({ message: error.message || "Failed to add suggestion" });
   }
 });
 
+// @desc    Add Comment to Suggestion
+router.post("/:id/comment", protect, async (req, res) => {
+  try {
+    const { message } = req.body;
+    if (!message)
+      return res.status(400).json({ message: "Message is required" });
+
+    const suggestion = await Suggestion.findById(req.params.id);
+    if (!suggestion)
+      return res.status(404).json({ message: "Suggestion not found" });
+
+    const newComment = {
+      user: req.user._id,
+      message,
+    };
+
+    suggestion.comments.push(newComment);
+    await suggestion.save();
+
+    const populatedSuggestion = await Suggestion.findById(
+      suggestion._id
+    ).populate("comments.user", "firstName lastName profilePicture");
+
+    res.status(201).json({
+      success: true,
+      comments: populatedSuggestion.comments,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @desc    Get all suggestions for a family (Enriched with Likes & Upvotes)
 router.get("/family/:familyId/suggestions", protect, async (req, res) => {
   try {
     const { familyId } = req.params;
@@ -55,33 +87,57 @@ router.get("/family/:familyId/suggestions", protect, async (req, res) => {
 
     const suggestions = await Suggestion.find({ familyId })
       .populate("sender", "firstName lastName profilePicture")
+      .populate("comments.user", "firstName lastName profilePicture")
       .sort({ createdAt: -1 });
 
     const enrichedSuggestions = suggestions.map((s) => {
       const obj = s.toObject();
-      const isReadArray = Array.isArray(obj.isRead) ? obj.isRead : [];
-
       return {
         ...obj,
         isOwner: obj.sender?._id?.toString() === userId.toString(),
-        upvoteCount: Array.isArray(obj.upvotes) ? obj.upvotes.length : 0,
-        hasUpvoted: Array.isArray(obj.upvotes) ? obj.upvotes.some(u => u.toString() === userId.toString()) : false,
-        isNew: !isReadArray.some(id => id && id.toString() === userId.toString())
+
+        // Upvote Logic
+        upvoteCount: obj.upvotes?.length || 0,
+        hasUpvoted:
+          obj.upvotes?.some((u) => u.toString() === userId.toString()) || false,
+
+        // Like Logic (NEW)
+        likeCount: obj.likes?.length || 0,
+        hasLiked:
+          obj.likes?.some((l) => l.toString() === userId.toString()) || false,
+
+        isNew: !obj.isRead?.some((id) => id.toString() === userId.toString()),
       };
     });
 
-    await Suggestion.updateMany(
-      { familyId, isRead: { $ne: userId } },
-      { $addToSet: { isRead: userId } }
-    );
-
     res.json({ success: true, suggestions: enrichedSuggestions });
   } catch (error) {
-    console.error("❌ Suggestion Fetch Error:", error);
     res.status(500).json({ message: "Error fetching suggestions" });
   }
 });
 
+// @desc    Toggle Like on Suggestion
+router.patch("/:id/like", protect, async (req, res) => {
+  try {
+    const suggestion = await Suggestion.findById(req.params.id);
+    if (!suggestion) return res.status(404).json({ message: "Not found" });
+
+    const likeIndex = suggestion.likes.indexOf(req.user._id);
+
+    if (likeIndex === -1) {
+      suggestion.likes.push(req.user._id); // Like
+    } else {
+      suggestion.likes.splice(likeIndex, 1); // Unlike
+    }
+
+    await suggestion.save();
+    res.json({ success: true, likeCount: suggestion.likes.length });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @desc    Toggle Upvote on Suggestion
 router.patch("/:id/upvote", protect, async (req, res) => {
   try {
     const suggestion = await Suggestion.findById(req.params.id);
@@ -90,9 +146,9 @@ router.patch("/:id/upvote", protect, async (req, res) => {
     const upvoteIndex = suggestion.upvotes.indexOf(req.user._id);
 
     if (upvoteIndex === -1) {
-      suggestion.upvotes.push(req.user._id); // Upvote
+      suggestion.upvotes.push(req.user._id);
     } else {
-      suggestion.upvotes.splice(upvoteIndex, 1); // Remove upvote
+      suggestion.upvotes.splice(upvoteIndex, 1);
     }
 
     await suggestion.save();

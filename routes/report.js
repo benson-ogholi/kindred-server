@@ -119,9 +119,11 @@ router.get("/family/:familyId", protect, async (req, res) => {
     const userId = req.user._id;
     const { familyId } = req.params;
 
+    // Populate sender, sharedWith, AND comments.user
     const reports = await Report.find({ familyId })
       .populate("sender", "firstName lastName profilePicture")
       .populate("sharedWith", "firstName lastName")
+      .populate("comments.user", "firstName lastName") // ✅ This is key
       .sort({ createdAt: -1 });
 
     const enrichedReports = reports.map((report) => {

@@ -45,28 +45,118 @@ router.post("/", protect, async (req, res) => {
 // 2. GET ALL USER'S FAMILIES
 router.get("/", protect, async (req, res) => {
   try {
-    const userId = req.user._id.toString();
+    const currentUserId = req.user._id;
+    const userIdStr = currentUserId.toString();
+
     const families = await Family.find({
-      $or: [{ owner: req.user._id }, { members: req.user._id }],
+      $or: [{ owner: currentUserId }, { members: currentUserId }],
     })
       .populate("owner", "firstName lastName email profilePicture")
       .populate("members", "firstName lastName email profilePicture")
       .sort({ createdAt: -1 });
 
-    const familiesWithFlags = families.map((f) => {
-      const family = f.toObject();
-      const isOwner = family.owner._id.toString() === userId;
-      const isMember = family.members.some((m) => m._id.toString() === userId);
-      return {
-        ...family,
-        isOwner,
-        isMember,
-        isNotMember: !(isOwner || isMember),
-      };
-    });
+    const enrichedFamilies = await Promise.all(
+      families.map(async (f) => {
+        const family = f.toObject();
 
-    res.status(200).json(familiesWithFlags);
+        // -------------------------
+        // FLAGS
+        // -------------------------
+        const isOwner = family.owner._id.toString() === userIdStr;
+        const isMember = family.members.some(
+          (m) => m._id.toString() === userIdStr
+        );
+
+        // -------------------------
+        // GLOBAL UNREAD COUNTS
+        // -------------------------
+        const [tasks, polls, suggestions, reports, news] = await Promise.all([
+          Task.countDocuments({
+            family: family._id,
+            isRead: { $ne: currentUserId },
+          }),
+          Poll.countDocuments({
+            familyId: family._id,
+            isRead: { $ne: currentUserId },
+            status: "active",
+          }),
+          Suggestion.countDocuments({
+            familyId: family._id,
+            isRead: { $ne: currentUserId },
+          }),
+          Report.countDocuments({
+            familyId: family._id,
+            isRead: { $ne: currentUserId },
+          }),
+          News.countDocuments({
+            family: family._id,
+            isRead: { $ne: currentUserId },
+          }),
+        ]);
+
+        const unreadSummary = {
+          tasks,
+          polls,
+          suggestions,
+          reports,
+          news,
+        };
+
+        // -------------------------
+        // CONTENT STATUS
+        // -------------------------
+        const contentUnreadData = await FamilyContent.aggregate([
+          {
+            $match: {
+              familyId: family._id,
+              isRead: { $ne: currentUserId },
+            },
+          },
+          {
+            $group: {
+              _id: "$contentType",
+              count: { $sum: 1 },
+            },
+          },
+        ]);
+
+        const map = {};
+        contentUnreadData.forEach((c) => {
+          map[c._id] = c.count;
+        });
+
+        const allContentTypes = [
+          "Family Tree",
+          "History",
+          "Village Tradition",
+          "Language Lesson",
+          "King",
+          "Patriarch",
+          "Resolution",
+          "My Village",
+          "Suggestion Box",
+        ];
+
+        const contentStatus = allContentTypes.map((type) => ({
+          type,
+          unreadCount: map[type] || 0,
+          hasUnread: (map[type] || 0) > 0,
+        }));
+
+        return {
+          ...family,
+          unreadSummary,
+          contentStatus,
+          isOwner,
+          isMember,
+          isNotMember: !(isOwner || isMember),
+        };
+      })
+    );
+
+    res.status(200).json(enrichedFamilies);
   } catch (error) {
+    console.error("Fetch families error:", error);
     res.status(500).json({ message: "Server error fetching families" });
   }
 });
