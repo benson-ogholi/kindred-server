@@ -18,6 +18,8 @@ const safetyNetSchema = new mongoose.Schema(
       required: [true, "Title is required"],
       trim: true,
     },
+    isRead: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Standardized
+ 
     // Media Arrays
     imageUrls: [{ type: String }],
     audioUrls: [{ type: String }],

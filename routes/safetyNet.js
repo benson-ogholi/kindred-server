@@ -90,37 +90,42 @@ router.post(
 // GET /api/v1/safety-net/family/:familyId
 // ---------------------------------------------------------
 router.get("/family/:familyId", protect, async (req, res) => {
-  console.log(
-    "📂 [GET ALL] Fetching family vaults for ID:",
-    req.params.familyId
-  );
-
-  try {
+    const userId = req.user._id;
     const { familyId } = req.params;
-
-    // Populate BOTH createdBy and assignedUsers with the FULL schema
-    const nets = await SafetyNet.find({ family: familyId })
-      .populate("createdBy", "-password") // Get full owner info (minus password)
-      .populate("assignedUsers", "-password") // Get full list of beneficiaries
-      .sort({ createdAt: -1 });
-
-    console.log(`✅ [GET ALL SUCCESS] Found ${nets.length} vaults.`);
-
-    // Debug Log: Check the first user of the first vault
-    if (nets.length > 0 && nets[0].assignedUsers.length > 0) {
-      console.log("👤 [USER DATA SAMPLE]:", {
-        name: `${nets[0].assignedUsers[0].firstName} ${nets[0].assignedUsers[0].lastName}`,
-        email: nets[0].assignedUsers[0].email,
-        id: nets[0].assignedUsers[0]._id,
-      });
+  
+    console.log("📂 [GET ALL] Fetching and marking family vaults for ID:", familyId);
+  
+    try {
+      // 1. Mark relevant vaults as Read before returning them
+      // We only mark as read if: 
+      // - The vault belongs to this family
+      // - The user is an assigned beneficiary
+      // - The vault is already RELEASED
+      await SafetyNet.updateMany(
+        {
+          family: familyId,
+          assignedUsers: userId,
+          status: "RELEASED",
+          isRead: { $ne: userId } // Only update if not already in the array
+        },
+        {
+          $addToSet: { isRead: userId } // Add user to read list
+        }
+      );
+  
+      // 2. Fetch the updated list
+      const nets = await SafetyNet.find({ family: familyId })
+        .populate("createdBy", "-password")
+        .populate("assignedUsers", "-password")
+        .sort({ createdAt: -1 });
+  
+      console.log(`✅ [GET ALL SUCCESS] Found ${nets.length} vaults.`);
+      res.status(200).json(nets);
+    } catch (error) {
+      console.error("🔥 [GET ALL ERROR]:", error.message);
+      res.status(500).json({ message: "Error fetching safety nets" });
     }
-
-    res.status(200).json(nets);
-  } catch (error) {
-    console.error("🔥 [GET ALL ERROR]:", error.message);
-    res.status(500).json({ message: "Error fetching safety nets" });
-  }
-});
+  });
 
 // ---------------------------------------------------------
 // 7️⃣ GET SINGLE SAFETY NET BY ID

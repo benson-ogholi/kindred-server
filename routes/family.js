@@ -191,7 +191,7 @@ router.get("/:id", protect, async (req, res) => {
         (id) => id.toString() === currentUserIdStr
       ) || false;
 
-    // 🔹 Global Feature Counts (excluding donations for now)
+    // 🔹 Global Feature Counts
     const [
       globalTasks,
       globalPolls,
@@ -199,6 +199,7 @@ router.get("/:id", protect, async (req, res) => {
       globalReports,
       globalNews,
       unreadCampaigns,
+      globalSafetyNets, // 🔥 NEW: Unread Safety Nets
     ] = await Promise.all([
       Task.countDocuments({
         family: familyDoc._id,
@@ -221,15 +222,21 @@ router.get("/:id", protect, async (req, res) => {
         family: familyDoc._id,
         isRead: { $ne: currentUserId },
       }),
-
       // ✅ Unread DonationCampaigns
       DonationCampaign.countDocuments({
         family: familyDoc._id,
         isRead: { $ne: currentUserId },
       }),
+      // 🔥 NEW: Count Released Safety Nets assigned to user that haven't been read
+      SafetyNet.countDocuments({
+        family: familyDoc._id,
+        assignedUsers: currentUserId,
+        status: "RELEASED", // Only count as unread if they can actually see the content
+        isRead: { $ne: currentUserId },
+      }),
     ]);
 
-    // 🔥 Count unread Contributions (must lookup campaign → family)
+    // 🔥 Count unread Contributions
     const unreadContributionsAgg = await Contribution.aggregate([
       {
         $lookup: {
@@ -252,7 +259,6 @@ router.get("/:id", protect, async (req, res) => {
     const unreadContributions =
       unreadContributionsAgg.length > 0 ? unreadContributionsAgg[0].count : 0;
 
-    // ✅ Merge DonationCampaign + Contribution counts
     const totalUnreadDonations = unreadCampaigns + unreadContributions;
 
     // 🔹 FamilyContent Type Counts
@@ -277,15 +283,8 @@ router.get("/:id", protect, async (req, res) => {
     }, {});
 
     const allContentTypes = [
-      "Family Tree",
-      "History",
-      "Village Tradition",
-      "Language Lesson",
-      "King",
-      "Patriarch",
-      "Resolution",
-      "My Village",
-      "Suggestion Box",
+      "Family Tree", "History", "Village Tradition", "Language Lesson",
+      "King", "Patriarch", "Resolution", "My Village", "Suggestion Box",
     ];
 
     const contentStatus = allContentTypes.map((type) => ({
@@ -309,16 +308,14 @@ router.get("/:id", protect, async (req, res) => {
               suggestions: 0,
               reports: 0,
               news: 0,
-              donations: 0, // optional per-member
+              donations: 0,
+              safetyNets: 0, // NEW
             },
           };
         }
 
         const usersPair = [currentUserIdStr, memberId].sort();
-
-        let unified = await UnifiedIds.findOne({
-          users: { $size: 2, $all: usersPair },
-        });
+        let unified = await UnifiedIds.findOne({ users: { $size: 2, $all: usersPair } });
 
         if (!unified) {
           unified = await UnifiedIds.create({
@@ -361,7 +358,8 @@ router.get("/:id", protect, async (req, res) => {
       suggestions: globalSuggestions,
       reports: globalReports,
       news: globalNews,
-      donations: totalUnreadDonations, // ✅ MERGED VALUE
+      donations: totalUnreadDonations,
+      safetyNets: globalSafetyNets, // 🔥 NEW: Added to summary
     };
 
     family.contentStatus = contentStatus;
@@ -376,9 +374,7 @@ router.get("/:id", protect, async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Fetch family error:", error);
-    res.status(500).json({
-      message: "Server error fetching family details",
-    });
+    res.status(500).json({ message: "Server error fetching family details" });
   }
 });
 // 4. LOOKUP FAMILY BY INVITE CODE
