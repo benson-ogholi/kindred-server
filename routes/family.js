@@ -15,6 +15,7 @@ const FamilyContent = require("../models/FamilyContent");
 const sendInviteEmail = require("../utils/sendInviteEmail");
 const DonationCampaign = require("../models/DonationCampaign");
 const Contribution = require("../models/Contribution");
+const SafetyNet = require("../models/SafetyNet");
 
 // 1. CREATE A FAMILY
 router.post("/", protect, async (req, res) => {
