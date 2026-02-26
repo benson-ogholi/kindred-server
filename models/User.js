@@ -49,7 +49,15 @@ const userSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
-
+    isOnline: {
+      type: Boolean,
+      default: false,
+    },
+    
+    socketId: {
+      type: String,
+      default: null,
+    },
     /* 🔐 PRIVACY SETTINGS */
     privacySettings: {
       showNameInDonations: {

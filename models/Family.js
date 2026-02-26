@@ -16,6 +16,7 @@ const FamilySchema = new mongoose.Schema(
         "Alumni Group",
         "Community",
         "Religious Group",
+        "Others"
       ],
       required: true,
       

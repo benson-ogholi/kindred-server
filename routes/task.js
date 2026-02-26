@@ -65,7 +65,7 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
     const tasks = await Task.find({ family: familyId })
       .populate("assignedTo", "firstName lastName")
-      .populate("createdBy", "firstName lastName")
+      .populate("createdBy", "firstName lastName") // I: Fetches the name of the poster
       .sort({ createdAt: -1 });
 
     const enrichedTasks = tasks.map((task) => {
@@ -74,10 +74,19 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
       return {
         ...taskObj,
-        isNew: !isReadArray.some(id => id && id.toString() === userId.toString()),
+        // II: Format the date for the frontend
+        formattedDate: task.createdAt.toLocaleDateString(),
+        // III: Permission Check - Only true if the logged-in user created it
+        canEdit: task.createdBy._id.toString() === userId.toString(),
+        isNew: !isReadArray.some(
+          (id) => id && id.toString() === userId.toString()
+        ),
       };
     });
+    
 
+
+    // Mark as read logic
     await Task.updateMany(
       { family: familyId, isRead: { $ne: userId } },
       { $addToSet: { isRead: userId } }
@@ -89,7 +98,6 @@ router.get("/family/:familyId", protect, async (req, res) => {
     res.status(500).json({ message: "Failed to fetch tasks" });
   }
 });
-
 router.put("/:taskId", protect, async (req, res) => {
   try {
     const task = await Task.findById(req.params.taskId);

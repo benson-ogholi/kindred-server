@@ -30,10 +30,16 @@ async function uploadToBackblaze(fileBuffer, originalName, folder = "uploads") {
     });
 
     return `https://f005.backblazeb2.com/file/${bucketName}/${uploadedData.fileName}`;
+    // Change your catch block in utils/uploadToBackblaze.js
   } catch (error) {
-    throw new Error("Failed to upload file to Backblaze B2");
+    console.error(
+      "B2 Upload Error Details:",
+      error.response ? error.response.data : error.message
+    );
+    throw new Error(`Backblaze Upload failed: ${error.message}`);
   }
 }
+
 
 module.exports = {
   uploadToBackblaze,

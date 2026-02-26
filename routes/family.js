@@ -13,6 +13,8 @@ const Report = require("../models/Report");
 const News = require("../models/News");
 const FamilyContent = require("../models/FamilyContent");
 const sendInviteEmail = require("../utils/sendInviteEmail");
+const DonationCampaign = require("../models/DonationCampaign");
+const Contribution = require("../models/Contribution");
 
 // 1. CREATE A FAMILY
 router.post("/", protect, async (req, res) => {
@@ -168,14 +170,14 @@ router.get("/:id", protect, async (req, res) => {
     const currentUserIdStr = currentUserId.toString();
 
     const familyDoc = await Family.findById(req.params.id)
-      .populate("owner", "firstName lastName email profilePicture")
-      .populate("members", "firstName lastName email profilePicture");
+      .populate("owner", "firstName lastName email profilePicture isOnline")
+      .populate("members", "firstName lastName email profilePicture isOnline");
 
     if (!familyDoc) {
       return res.status(404).json({ message: "Family not found" });
     }
 
-    // 1. 🔹 Permissions
+    // 🔹 Permissions
     const isOwner = familyDoc.owner._id.toString() === currentUserIdStr;
     const isMember = familyDoc.members.some(
       (m) => m._id.toString() === currentUserIdStr
@@ -189,14 +191,14 @@ router.get("/:id", protect, async (req, res) => {
         (id) => id.toString() === currentUserIdStr
       ) || false;
 
-    // 2. 🔹 Global Feature Unread Counts (For the current user across the whole family)
-    // We run these in parallel for maximum speed
+    // 🔹 Global Feature Counts (excluding donations for now)
     const [
       globalTasks,
       globalPolls,
       globalSuggestions,
       globalReports,
       globalNews,
+      unreadCampaigns,
     ] = await Promise.all([
       Task.countDocuments({
         family: familyDoc._id,
@@ -219,9 +221,41 @@ router.get("/:id", protect, async (req, res) => {
         family: familyDoc._id,
         isRead: { $ne: currentUserId },
       }),
+
+      // ✅ Unread DonationCampaigns
+      DonationCampaign.countDocuments({
+        family: familyDoc._id,
+        isRead: { $ne: currentUserId },
+      }),
     ]);
 
-    // 3. 🔹 FamilyContent Type Counts (History, Village Tradition, etc.)
+    // 🔥 Count unread Contributions (must lookup campaign → family)
+    const unreadContributionsAgg = await Contribution.aggregate([
+      {
+        $lookup: {
+          from: "donationcampaigns",
+          localField: "campaign",
+          foreignField: "_id",
+          as: "campaignData",
+        },
+      },
+      { $unwind: "$campaignData" },
+      {
+        $match: {
+          "campaignData.family": familyDoc._id,
+          isRead: { $ne: currentUserId },
+        },
+      },
+      { $count: "count" },
+    ]);
+
+    const unreadContributions =
+      unreadContributionsAgg.length > 0 ? unreadContributionsAgg[0].count : 0;
+
+    // ✅ Merge DonationCampaign + Contribution counts
+    const totalUnreadDonations = unreadCampaigns + unreadContributions;
+
+    // 🔹 FamilyContent Type Counts
     const contentUnreadData = await FamilyContent.aggregate([
       {
         $match: {
@@ -260,7 +294,7 @@ router.get("/:id", protect, async (req, res) => {
       hasUnread: (contentUnreadMap[type] || 0) > 0,
     }));
 
-    // 4. 🔹 Prepare members (Personal unread counts for chat/tasks)
+    // 🔹 Prepare members
     const membersWithUUIDAndUnreadCounts = await Promise.all(
       (familyDoc.members || []).map(async (member) => {
         const memberId = member._id.toString();
@@ -275,11 +309,13 @@ router.get("/:id", protect, async (req, res) => {
               suggestions: 0,
               reports: 0,
               news: 0,
+              donations: 0, // optional per-member
             },
           };
         }
 
         const usersPair = [currentUserIdStr, memberId].sort();
+
         let unified = await UnifiedIds.findOne({
           users: { $size: 2, $all: usersPair },
         });
@@ -291,7 +327,6 @@ router.get("/:id", protect, async (req, res) => {
           });
         }
 
-        // Member-specific logic (e.g. tasks assigned specifically to THEM that YOU haven't read)
         const [mTasks, mReports] = await Promise.all([
           Task.countDocuments({
             family: familyDoc._id,
@@ -308,22 +343,25 @@ router.get("/:id", protect, async (req, res) => {
         return {
           ...member.toObject(),
           uuid: unified.unifiedId,
-          unreadCounts: { tasks: mTasks, reports: mReports },
+          unreadCounts: {
+            tasks: mTasks,
+            reports: mReports,
+          },
         };
       })
     );
 
-    // 5. 🔹 Final Response Assembly
+    // 🔹 Final Assembly
     const family = familyDoc.toObject();
     family.members = membersWithUUIDAndUnreadCounts;
 
-    // Add global feature counts to the main family object
     family.unreadSummary = {
       tasks: globalTasks,
       polls: globalPolls,
       suggestions: globalSuggestions,
       reports: globalReports,
       news: globalNews,
+      donations: totalUnreadDonations, // ✅ MERGED VALUE
     };
 
     family.contentStatus = contentStatus;
@@ -338,10 +376,11 @@ router.get("/:id", protect, async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Fetch family error:", error);
-    res.status(500).json({ message: "Server error fetching family details" });
+    res.status(500).json({
+      message: "Server error fetching family details",
+    });
   }
 });
-
 // 4. LOOKUP FAMILY BY INVITE CODE
 router.get("/invite/:inviteCode", protect, async (req, res) => {
   try {
@@ -754,6 +793,90 @@ router.put("/:familyId/members", protect, async (req, res) => {
   } catch (error) {
     console.error("Update members error:", error);
     res.status(500).json({ message: "Server error updating members" });
+  }
+});
+
+// 15. SUSPEND A USER (OWNER ONLY)
+router.post("/:familyId/suspend/:userId", protect, async (req, res) => {
+  try {
+    const { familyId, userId } = req.params;
+    const family = await Family.findById(familyId);
+
+    if (!family) return res.status(404).json({ message: "Family not found" });
+
+    // Only owner can suspend
+    if (family.owner.toString() !== req.user._id.toString())
+      return res.status(403).json({ message: "Unauthorized" });
+
+    // Cannot suspend owner
+    if (family.owner.toString() === userId)
+      return res.status(400).json({ message: "Cannot suspend owner" });
+
+    // Check if user is a member
+    if (!family.members.includes(userId))
+      return res.status(400).json({ message: "User is not a member" });
+
+    // Add to suspendedMembers if not already
+    family.suspendedMembers = family.suspendedMembers || [];
+    if (!family.suspendedMembers.includes(userId)) {
+      family.suspendedMembers.push(userId);
+      await family.save();
+
+      await createFamilyNotifications(familyId, req.user._id, {
+        type: "USER_SUSPENDED",
+        title: "Member Suspended",
+        message: `User was suspended from "${family.familyName}"`,
+        relatedId: familyId,
+        receiver: userId,
+      });
+    }
+
+    res.status(200).json({
+      message: "User suspended",
+      suspendedMembers: family.suspendedMembers,
+    });
+  } catch (error) {
+    console.error("Suspend user error:", error);
+    res.status(500).json({ message: "Server error suspending user" });
+  }
+});
+
+// 16. UNSUSPEND A USER (OWNER ONLY)
+router.post("/:familyId/unsuspend/:userId", protect, async (req, res) => {
+  try {
+    const { familyId, userId } = req.params;
+    const family = await Family.findById(familyId);
+
+    if (!family) return res.status(404).json({ message: "Family not found" });
+
+    // Only owner can unsuspend
+    if (family.owner.toString() !== req.user._id.toString())
+      return res.status(403).json({ message: "Unauthorized" });
+
+    // Remove from suspendedMembers if exists
+    family.suspendedMembers = family.suspendedMembers || [];
+    if (family.suspendedMembers.includes(userId)) {
+      family.suspendedMembers = family.suspendedMembers.filter(
+        (id) => id.toString() !== userId
+      );
+      await family.save();
+
+      await createFamilyNotifications(familyId, req.user._id, {
+        type: "USER_UNSUSPENDED",
+        title: "Member Unsuspended",
+        message: `User was unsuspended in "${family.familyName}"`,
+        relatedId: familyId,
+        receiver: userId,
+      });
+    }
+
+    res.status(200).json({
+      message: "User unsuspended",
+      suspendedMembers: family.suspendedMembers,
+    });
+  } catch (error) {
+    console.error("Unsuspend user error:", error);
+    res.status(500).json({ message: "Server error unsuspending user" });
   }
 });
 

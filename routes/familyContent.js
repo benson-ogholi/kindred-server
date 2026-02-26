@@ -10,7 +10,6 @@ const { uploadToBackblaze } = require("../utils/uploadToBackblaze");
 // Memory storage to keep files in buffer (needed for Backblaze upload)
 // const upload = multer({ storage: multer.memoryStorage() });
 
-
 // ===============================
 // Multer (NO LIMITS ON IMAGES)
 // ===============================
@@ -114,48 +113,56 @@ router.post("/content-content/:id/comment", protect, async (req, res) => {
 // ===============================
 // @route   DELETE /api/family-content/:id/comment/:commentId
 // @access  Private
-router.delete("/content-content/:id/comment/:commentId", protect, async (req, res) => {
-  try {
-    const content = await FamilyContent.findById(req.params.id);
+router.delete(
+  "/content-content/:id/comment/:commentId",
+  protect,
+  async (req, res) => {
+    try {
+      const content = await FamilyContent.findById(req.params.id);
 
-    if (!content) {
-      return res.status(404).json({ message: "Content not found" });
+      if (!content) {
+        return res.status(404).json({ message: "Content not found" });
+      }
+
+      // Find comment
+      const comment = content.comments.id(req.params.commentId);
+
+      if (!comment) {
+        return res.status(404).json({ message: "Comment not found" });
+      }
+
+      // Check authorization (only comment creator or content creator can delete)
+      if (
+        comment.user.toString() !== req.user._id.toString() &&
+        content.creator.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Not authorized to delete this comment" });
+      }
+
+      comment.remove();
+      await content.save();
+
+      res.json({ success: true, message: "Comment removed" });
+    } catch (error) {
+      console.error("❌ Delete Comment Error:", error);
+      res.status(500).json({ message: error.message });
     }
-
-    // Find comment
-    const comment = content.comments.id(req.params.commentId);
-
-    if (!comment) {
-      return res.status(404).json({ message: "Comment not found" });
-    }
-
-    // Check authorization (only comment creator or content creator can delete)
-    if (
-      comment.user.toString() !== req.user._id.toString() &&
-      content.creator.toString() !== req.user._id.toString()
-    ) {
-      return res.status(403).json({ message: "Not authorized to delete this comment" });
-    }
-
-    comment.remove();
-    await content.save();
-
-    res.json({ success: true, message: "Comment removed" });
-  } catch (error) {
-    console.error("❌ Delete Comment Error:", error);
-    res.status(500).json({ message: error.message });
   }
-});
-
+);
 
 router.post(
   "/",
   protect,
-  upload.any(), // 🔥 accept ALL file fields safely
+  upload.any(), // accept all files
   async (req, res) => {
     try {
       console.log("📥 BODY:", req.body);
-      console.log("📁 FILES:", req.files?.map(f => f.fieldname));
+      console.log(
+        "📁 FILES:",
+        req.files?.map((f) => f.fieldname)
+      );
 
       const {
         familyId,
@@ -164,6 +171,7 @@ router.post(
         description,
         voiceDuration,
         metadata,
+        creator: providedCreator,
       } = req.body;
 
       if (!familyId || !contentType) {
@@ -179,7 +187,7 @@ router.post(
       let voiceNote = null;
 
       for (const file of req.files || []) {
-        // ---- Images (UNLIMITED)
+        // ---- Images
         if (file.mimetype.startsWith("image/")) {
           const url = await uploadToBackblaze(
             file.buffer,
@@ -194,7 +202,7 @@ router.post(
           });
         }
 
-        // ---- Voice Note
+        // ---- Voice Notes
         if (file.mimetype.startsWith("audio/")) {
           const audioUrl = await uploadToBackblaze(
             file.buffer,
@@ -217,7 +225,7 @@ router.post(
       if (metadata) {
         try {
           parsedMetadata = JSON.parse(metadata);
-        } catch {
+        } catch (err) {
           parsedMetadata = {};
         }
       }
@@ -233,21 +241,18 @@ router.post(
         images,
         voiceNote,
         metadata: parsedMetadata,
-        creator: req.user._id,
+        creator: providedCreator || req.user._id, // fallback to current user
       });
 
       // ===============================
       // NOTIFICATION
       // ===============================
       const family = await Family.findById(familyId).select("familyName");
-
       if (family) {
         await createFamilyNotifications(familyId, req.user._id, {
           type: "FAMILY_UPDATE",
           title: `${family.familyName} Updates`,
-          message: title
-            ? title
-            : `New ${contentType} content added`,
+          message: title ? title : `New ${contentType} content added`,
           relatedId: content._id,
         });
       }
@@ -264,7 +269,6 @@ router.post(
     }
   }
 );
-
 // ===============================
 // GET ALL CONTENT BY FAMILY & TYPE
 // ===============================

@@ -6,7 +6,7 @@ const notificationSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      index: true, 
+      index: true,
     },
     familyId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -32,7 +32,12 @@ const notificationSchema = new mongoose.Schema(
         "FAMILY_JOIN_REQUEST",
         "FAMILY_JOIN_DECLINED",
         "REPORT_COMMENT",
-        "FAMILY_INVITE"
+        "FAMILY_INVITE",
+
+        "CONTRIBUTION_SUBMITTED", // When a user uploads a receipt
+        "PAYMENT_APPROVED", // When admin accepts
+        "PAYMENT_REJECTED", // When admin declines
+        "SAFETY_NET_RELEASED",
       ],
     },
     title: {

@@ -240,13 +240,13 @@ router.put("/:newsId", protect, async (req, res) => {
     console.log("➡️ Content-Type:", req.headers["content-type"]);
 
     const news = await News.findById(req.params.newsId);
-
+    console.log("news.author.toString()", news.author.toString());
     if (!news) {
       console.log("❌ News not found");
       return res.status(404).json({ message: "News not found" });
     }
 
-    if (news.author.toString() !== req.user._id.toString()) {
+    if (req.user._id.toString()) {
       console.log("🚫 Unauthorized update attempt");
       return res
         .status(403)

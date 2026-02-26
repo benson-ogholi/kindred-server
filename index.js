@@ -19,6 +19,8 @@ const Message = require("./models/Message");
 const contentRoutes = require("./routes/familyContent");
 const { uploadToBackblaze } = require("./utils/uploadToBackblaze");
 const familyMembers = require("./routes/familyMembers");
+const User = require("./models/User");
+const SafetyNet = require("./routes/safetyNet");
 
 require("dotenv").config();
 
@@ -48,6 +50,7 @@ app.use("/api/v1/users", userRoutes);
 app.use("/api/v1/donations", donationsRoutes);
 app.use("/api/v1/family-content", contentRoutes);
 app.use("/api/v1/family-members", familyMembers);
+app.use("/api/v1/safety-net", SafetyNet);
 app.get("/", (req, res) => {
   res.send("Kindred Auth Server Running 🚀");
 });
@@ -59,6 +62,32 @@ app.get("/", (req, res) => {
 io.on("connection", (socket) => {
   console.log(`👤 User Connected: ${socket.id}`);
 
+  socket.on("register_user", async ({ userId }) => {
+    if (!userId) return;
+
+    try {
+      socket.userId = userId;
+
+      const user = await User.findById(userId);
+
+      if (!user) return;
+
+      // If user had no socket before → set online true
+      const wasOffline = !user.socketId;
+
+      user.socketId = socket.id;
+
+      if (wasOffline) {
+        user.isOnline = true;
+      }
+
+      await user.save();
+
+      console.log(`🟢 User ${userId} connected with socket ${socket.id}`);
+    } catch (err) {
+      console.error("Error registering user:", err);
+    }
+  });
   // 1. Join Room & Load History + Mark as Read
   socket.on("join_room", async (data) => {
     const { uuid, fullName, userId } = data;
@@ -396,8 +425,23 @@ io.on("connection", (socket) => {
     }
   }
 
-  socket.on("disconnect", () => {
-    console.log("❌ User Disconnected");
+  socket.on("disconnect", async () => {
+    console.log("❌ User Disconnected:", socket.id);
+
+    try {
+      const user = await User.findOne({ socketId: socket.id });
+
+      if (!user) return;
+
+      user.socketId = null;
+      user.isOnline = false;
+
+      await user.save();
+
+      console.log(`🔴 User ${user._id} is now offline`);
+    } catch (err) {
+      console.error("Error updating offline status:", err);
+    }
   });
 });
 // --- DATABASE & SERVER START ---
