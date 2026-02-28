@@ -280,7 +280,53 @@ io.on("connection", (socket) => {
       }
     }
   );
+  socket.on("get_conversations", async ({ userId }) => {
+    try {
+      const conversations = await Message.aggregate([
+        // 1. Filter messages involving the current user
+        { $match: { $or: [{ senderId: userId }, { receiverId: userId }] } },
 
+        // 2. Sort by newest first so the group picks the latest message data
+        { $sort: { timestamp: -1 } },
+
+        // 3. Group by the Room
+        {
+          $group: {
+            _id: "$roomUuid",
+            lastMessage: { $first: "$message" },
+            timestamp: { $first: "$timestamp" },
+            senderName: { $first: "$senderName" },
+            senderId: { $first: "$senderId" },
+            receiverId: { $first: "$receiverId" },
+            // Grab the profile picture from the latest message
+            profilePicture: { $first: "$receiverProfilePicture" },
+
+            // 4. Calculate unreadCount: Only count if I am the receiver and isRead is false
+            unreadCount: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$receiverId", userId] },
+                      { $eq: ["$isRead", false] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
+        // 5. Final sort to keep newest conversations at the top
+        { $sort: { timestamp: -1 } },
+      ]);
+
+      socket.emit("conversations_list", conversations);
+    } catch (err) {
+      console.error("❌ Error fetching conversations:", err);
+    }
+  });
   // 6. Typing Indicators
   socket.on("typing", (data) => {
     socket
