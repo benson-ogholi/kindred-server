@@ -1,8 +1,8 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
-const http = require("http"); // 1. Import http
-const { Server } = require("socket.io"); // 2. Import Socket.io
+const http = require("http");
+const { Server } = require("socket.io");
 
 const authRoutes = require("./routes/auth");
 const familiesRoutes = require("./routes/family");
@@ -25,16 +25,21 @@ const SafetyNet = require("./routes/safetyNet");
 require("dotenv").config();
 
 const app = express();
-const server = http.createServer(app); // 3. Create the HTTP server
+const server = http.createServer(app);
+
+// --- 1. CRITICAL FIX: PAYLOAD SIZE ---
+// maxHttpBufferSize prevents disconnects when sending large Base64 images
 const io = new Server(server, {
+  maxHttpBufferSize: 5e7, // 50MB
   cors: {
-    origin: "*", // Adjust this in production for security
+    origin: "*",
     methods: ["GET", "POST"],
   },
 });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // --- ROUTES ---
 app.use("/api/v1/auth", authRoutes);
@@ -51,52 +56,57 @@ app.use("/api/v1/donations", donationsRoutes);
 app.use("/api/v1/family-content", contentRoutes);
 app.use("/api/v1/family-members", familyMembers);
 app.use("/api/v1/safety-net", SafetyNet);
+
 app.get("/", (req, res) => {
   res.send("Kindred Auth Server Running 🚀");
 });
 
-// --- SOCKET.IO LOGIC ---
+// Helper for default text
+function getDefaultMessage(type) {
+  switch (type) {
+    case "image":
+      return "Photo";
+    case "video":
+      return "Video";
+    case "voice":
+      return "Voice Note";
+    default:
+      return "Message";
+  }
+}
 
 // --- SOCKET.IO LOGIC ---
-
 io.on("connection", (socket) => {
   console.log(`👤 User Connected: ${socket.id}`);
 
+  // 1. User Presence Registration
   socket.on("register_user", async ({ userId }) => {
     if (!userId) return;
-
     try {
       socket.userId = userId;
-
       const user = await User.findById(userId);
-
       if (!user) return;
 
-      // If user had no socket before → set online true
       const wasOffline = !user.socketId;
-
       user.socketId = socket.id;
-
-      if (wasOffline) {
-        user.isOnline = true;
-      }
+      if (wasOffline) user.isOnline = true;
 
       await user.save();
-
-      console.log(`🟢 User ${userId} connected with socket ${socket.id}`);
+      console.log(`🟢 User ${userId} registered online`);
     } catch (err) {
       console.error("Error registering user:", err);
     }
   });
-  // 1. Join Room & Load History + Mark as Read
+
+  // 2. Room Join & History
   socket.on("join_room", async (data) => {
-    const { uuid, fullName, userId } = data;
+    const { uuid, userId } = data;
     if (!uuid) return;
 
     socket.join(uuid);
 
     try {
-      // Update all messages in this room sent to ME as read
+      // Mark messages as read when entering room
       await Message.updateMany(
         { roomUuid: uuid, receiverId: userId, isRead: false },
         { $set: { isRead: true } }
@@ -122,7 +132,7 @@ io.on("connection", (socket) => {
           status: "sent",
         }))
       );
-      // Notify the sender that their messages were read
+
       io.to(uuid).emit("messages_marked_read", {
         roomUuid: uuid,
         readerId: userId,
@@ -132,182 +142,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Inside io.on("connection", (socket) => { ... })
-
-  // ─── TYPING INDICATOR ────────────────────────────────────────
-  socket.on("typing", (data) => {
-    const { uuid, fullName } = data;
-    if (!uuid) return;
-
-    // Broadcast to everyone in the room (except sender)
-    socket.to(uuid).emit("user_typing", {
-      roomUuid: uuid,
-      userId: socket.id, // or use real userId if you prefer
-      name: fullName || "Someone",
-      isTyping: true,
-    });
-  });
-
-  socket.on("stop_typing", (data) => {
-    const { uuid } = data;
-    if (!uuid) return;
-
-    socket.to(uuid).emit("user_typing", {
-      roomUuid: uuid,
-      userId: socket.id,
-      isTyping: false,
-    });
-  });
-
-  // 2. Get Conversations with Unread Counts
-  socket.on("get_conversations", async ({ userId }) => {
-    try {
-      const conversations = await Message.aggregate([
-        // 1. Filter messages involving the current user
-        { $match: { $or: [{ senderId: userId }, { receiverId: userId }] } },
-
-        // 2. Sort by newest first so the group picks the latest message data
-        { $sort: { timestamp: -1 } },
-
-        // 3. Group by the Room
-        {
-          $group: {
-            _id: "$roomUuid",
-            lastMessage: { $first: "$message" },
-            timestamp: { $first: "$timestamp" },
-            senderName: { $first: "$senderName" },
-            senderId: { $first: "$senderId" },
-            receiverId: { $first: "$receiverId" },
-            // Grab the profile picture from the latest message
-            profilePicture: { $first: "$receiverProfilePicture" },
-
-            // 4. Calculate unreadCount: Only count if I am the receiver and isRead is false
-            unreadCount: {
-              $sum: {
-                $cond: [
-                  {
-                    $and: [
-                      { $eq: ["$receiverId", userId] },
-                      { $eq: ["$isRead", false] },
-                    ],
-                  },
-                  1,
-                  0,
-                ],
-              },
-            },
-          },
-        },
-        // 5. Final sort to keep newest conversations at the top
-        { $sort: { timestamp: -1 } },
-      ]);
-
-      socket.emit("conversations_list", conversations);
-    } catch (err) {
-      console.error("❌ Error fetching conversations:", err);
-    }
-  });
-  // --- ADD THIS INSIDE io.on("connection") ---
-
-  // User signals they are calling someone
-  socket.on("call_user", (data) => {
-    const { userToCall, signalData, from, fromName } = data;
-    // Notify the specific receiver that someone is calling them
-    io.emit(`incoming_call_${userToCall}`, {
-      signal: signalData,
-      from,
-      fromName,
-    });
-  });
-
-  // User answers the call
-  socket.on("answer_call", (data) => {
-    const { to, signal } = data;
-    // Send the signal back to the original caller
-    io.emit(`call_accepted_${to}`, { signal });
-  });
-
-  // Handle ICE Candidates (Connection path details)
-  socket.on("ice_candidate", (data) => {
-    const { to, candidate } = data;
-    io.emit(`ice_candidate_${to}`, { candidate });
-  });
-
-  // End Call
-  socket.on("end_call", (data) => {
-    const { to } = data;
-    io.emit(`call_ended_${to}`);
-  });
-
-  // 3. Send Message with Real-time Count Update
-  // Inside io.on("connection", (socket) => { ...
-
-  socket.on(
-    "edit_message",
-    async ({ uuid, messageUuid, newMessage, userId }) => {
-      try {
-        const msg = await Message.findOne({ messageUuid, senderId: userId });
-        if (!msg) {
-          return socket.emit("error", {
-            message: "Message not found or not yours",
-          });
-        }
-
-        const msgTime = new Date(msg.timestamp).getTime();
-        const now = Date.now();
-        if ((now - msgTime) / 60000 > 5) {
-          return socket.emit("error", {
-            message: "Edit time expired (5 minutes only)",
-          });
-        }
-
-        msg.message = newMessage.trim();
-        await msg.save();
-
-        io.to(uuid).emit("message_edited", {
-          uuid: messageUuid,
-          newMessage: msg.message,
-        });
-      } catch (err) {
-        console.error("Edit failed:", err);
-        socket.emit("error", { message: "Failed to edit message" });
-      }
-    }
-  );
-
-  // Delete Message
-  socket.on(
-    "delete_message",
-    async ({ uuid, messageUuid, userId, forEveryone }) => {
-      try {
-        const msg = await Message.findOne({ messageUuid });
-        if (!msg) {
-          return socket.emit("error", { message: "Message not found" });
-        }
-
-        const msgTime = new Date(msg.timestamp).getTime();
-        const now = Date.now();
-        if ((now - msgTime) / 60000 > 5) {
-          return socket.emit("error", {
-            message: "Delete time expired (5 minutes only)",
-          });
-        }
-
-        if (forEveryone) {
-          // Delete from database → everyone sees it gone
-          await Message.deleteOne({ messageUuid });
-          io.to(uuid).emit("message_deleted", { uuid: messageUuid });
-        } else {
-          // Only sender removes it from their view
-          socket.emit("message_deleted", { uuid: messageUuid });
-        }
-      } catch (err) {
-        console.error("Delete failed:", err);
-        socket.emit("error", { message: "Failed to delete message" });
-      }
-    }
-  );
-
+  // 3. Send Message (Fixed Buffer Logic)
   socket.on("send_message", async (data) => {
     const {
       uuid: roomUuid,
@@ -317,7 +152,7 @@ io.on("connection", (socket) => {
       receiverId,
       messageUuid,
       messageType = "text",
-      mediaUri: base64Media, // Client still sends in mediaUri (base64)
+      mediaUri: base64Media,
       duration = 0,
       receiverProfilePicture = "",
     } = data;
@@ -327,20 +162,16 @@ io.on("connection", (socket) => {
     }
 
     try {
-      let imageuri = "";
-      let videouri = "";
-      let audioUri = "";
+      let imageuri = "",
+        videouri = "",
+        audioUri = "";
 
-      // Upload only if it's media and base64 is provided
       if (base64Media && messageType !== "text") {
-        const base64Data = base64Media.split(";base64,").pop();
+        const parts = base64Media.split(";base64,");
+        const base64Data = parts.length > 1 ? parts.pop() : parts[0];
         const fileBuffer = Buffer.from(base64Data, "base64");
 
-        const extensionMap = {
-          image: "jpg",
-          video: "mp4",
-          voice: "m4a",
-        };
+        const extensionMap = { image: "jpg", video: "mp4", voice: "m4a" };
         const extension = extensionMap[messageType] || "bin";
         const fileName = `${messageType}s/${messageUuid}.${extension}`;
 
@@ -350,15 +181,11 @@ io.on("connection", (socket) => {
           "chat_attachments"
         );
 
-        // Assign to the correct field
         if (messageType === "image") imageuri = uploadedUrl;
-        if (messageType === "video") videouri = uploadedUrl;
-        if (messageType === "voice") audioUri = uploadedUrl;
-
-        console.log(`Uploaded ${messageType}: ${uploadedUrl}`);
+        else if (messageType === "video") videouri = uploadedUrl;
+        else if (messageType === "voice") audioUri = uploadedUrl;
       }
 
-      // Save message with separate fields
       const newMessage = new Message({
         roomUuid,
         message: textMessage || getDefaultMessage(messageType),
@@ -378,7 +205,6 @@ io.on("connection", (socket) => {
 
       await newMessage.save();
 
-      // Send back to clients with separate fields
       const messageToSend = {
         uuid: messageUuid,
         message: newMessage.message,
@@ -394,12 +220,10 @@ io.on("connection", (socket) => {
 
       io.to(roomUuid).emit("receive_message", messageToSend);
 
-      // Update unread count
       const unreadCount = await Message.countDocuments({
         receiverId,
         isRead: false,
       });
-
       io.to(roomUuid).emit("unread_update", {
         roomUuid,
         unreadCount,
@@ -411,39 +235,100 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Helper for default text
-  function getDefaultMessage(type) {
-    switch (type) {
-      case "image":
-        return "Photo";
-      case "video":
-        return "Video";
-      case "voice":
-        return "Voice Note";
-      default:
-        return "Message";
+  // 4. Edit Message
+  socket.on(
+    "edit_message",
+    async ({ uuid, messageUuid, newMessage, userId }) => {
+      try {
+        const msg = await Message.findOne({ messageUuid, senderId: userId });
+        if (!msg) return socket.emit("error", { message: "Access denied" });
+
+        const minutesPassed =
+          (Date.now() - new Date(msg.timestamp).getTime()) / 60000;
+        if (minutesPassed > 5)
+          return socket.emit("error", { message: "Time limit exceeded" });
+
+        msg.message = newMessage.trim();
+        await msg.save();
+
+        io.to(uuid).emit("message_edited", {
+          uuid: messageUuid,
+          newMessage: msg.message,
+        });
+      } catch (err) {
+        console.error("Edit failed:", err);
+      }
     }
-  }
+  );
 
+  // 5. Delete Message
+  socket.on(
+    "delete_message",
+    async ({ uuid, messageUuid, userId, forEveryone }) => {
+      try {
+        const msg = await Message.findOne({ messageUuid });
+        if (!msg) return;
+
+        if (forEveryone && msg.senderId === userId) {
+          await Message.deleteOne({ messageUuid });
+          io.to(uuid).emit("message_deleted", { uuid: messageUuid });
+        } else {
+          socket.emit("message_deleted", { uuid: messageUuid });
+        }
+      } catch (err) {
+        console.error("Delete failed:", err);
+      }
+    }
+  );
+
+  // 6. Typing Indicators
+  socket.on("typing", (data) => {
+    socket
+      .to(data.uuid)
+      .emit("user_typing", {
+        roomUuid: data.uuid,
+        name: data.fullName,
+        isTyping: true,
+      });
+  });
+
+  socket.on("stop_typing", (data) => {
+    socket
+      .to(data.uuid)
+      .emit("user_typing", { roomUuid: data.uuid, isTyping: false });
+  });
+
+  // 7. Calling Logic (WebRTC)
+  socket.on("call_user", (data) => {
+    const { userToCall, signalData, from, fromName } = data;
+    io.emit(`incoming_call_${userToCall}`, {
+      signal: signalData,
+      from,
+      fromName,
+    });
+  });
+
+  socket.on("answer_call", (data) => {
+    const { to, signal } = data;
+    io.emit(`call_accepted_${to}`, { signal });
+  });
+
+  // 8. Disconnect Handler
   socket.on("disconnect", async () => {
-    console.log("❌ User Disconnected:", socket.id);
-
     try {
       const user = await User.findOne({ socketId: socket.id });
-
-      if (!user) return;
-
-      user.socketId = null;
-      user.isOnline = false;
-
-      await user.save();
-
-      console.log(`🔴 User ${user._id} is now offline`);
+      if (user) {
+        user.socketId = null;
+        user.isOnline = false;
+        await user.save();
+        console.log(`🔴 User ${user._id} offline`);
+      }
     } catch (err) {
-      console.error("Error updating offline status:", err);
+      console.error("Disconnect error:", err);
     }
   });
 });
+
 // --- DATABASE & SERVER START ---
 mongoose
   .connect(process.env.MONGODB_URI)
@@ -451,7 +336,6 @@ mongoose
   .catch((err) => console.error("🔴 MongoDB Error:", err));
 
 const PORT = process.env.PORT || 5000;
-// 4. Use server.listen instead of app.listen
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });

@@ -90,98 +90,86 @@ router.post(
 // GET /api/v1/safety-net/family/:familyId
 // ---------------------------------------------------------
 router.get("/family/:familyId", protect, async (req, res) => {
-    const userId = req.user._id;
-    const { familyId } = req.params;
-  
-    console.log("📂 [GET ALL] Fetching and marking family vaults for ID:", familyId);
-  
-    try {
-      // 1. Mark relevant vaults as Read before returning them
-      // We only mark as read if: 
-      // - The vault belongs to this family
-      // - The user is an assigned beneficiary
-      // - The vault is already RELEASED
+  const userId = req.user._id;
+  const { familyId } = req.params;
+  const now = new Date(); // Current time to compare against triggerDate
+
+  console.log("📂 [GET ALL] Fetching vaults for family:", familyId);
+
+  try {
+      // 1. Mark relevant vaults as Read (Keep your existing logic for RELEASED vaults)
       await SafetyNet.updateMany(
-        {
-          family: familyId,
-          assignedUsers: userId,
-          status: "RELEASED",
-          isRead: { $ne: userId } // Only update if not already in the array
-        },
-        {
-          $addToSet: { isRead: userId } // Add user to read list
-        }
+          {
+              family: familyId,
+              assignedUsers: userId,
+              status: "RELEASED",
+              isRead: { $ne: userId }
+          },
+          { $addToSet: { isRead: userId } }
       );
-  
-      // 2. Fetch the updated list
-      const nets = await SafetyNet.find({ family: familyId })
-        .populate("createdBy", "-password")
-        .populate("assignedUsers", "-password")
-        .sort({ createdAt: -1 });
-  
-      console.log(`✅ [GET ALL SUCCESS] Found ${nets.length} vaults.`);
+
+      // 2. Fetch with Privacy Logic
+      const nets = await SafetyNet.find({
+          family: familyId,
+          $or: [
+              { createdBy: userId },             // Rule 1: I created it, I can see it.
+              { triggerDate: { $lte: now } }    // Rule 2: It's past the trigger date, anyone assigned can see it.
+          ]
+      })
+      .populate("createdBy", "-password")
+      .populate("assignedUsers", "-password")
+      .sort({ createdAt: -1 });
+
+      console.log(`✅ [GET ALL SUCCESS] Found ${nets.length} visible vaults.`);
       res.status(200).json(nets);
-    } catch (error) {
+  } catch (error) {
       console.error("🔥 [GET ALL ERROR]:", error.message);
       res.status(500).json({ message: "Error fetching safety nets" });
-    }
-  });
+  }
+});
 
 // ---------------------------------------------------------
 // 7️⃣ GET SINGLE SAFETY NET BY ID
 // GET /api/v1/safety-net/:id
 // ---------------------------------------------------------
 router.get("/:id", protect, async (req, res) => {
-  console.log("🔍 [GET SINGLE] Fetching vault ID:", req.params.id);
+  const userId = req.user._id.toString();
+  const now = new Date();
 
   try {
     const net = await SafetyNet.findById(req.params.id)
-      .populate("createdBy", "firstName lastName email avatar") // Populate creator
-      .populate("assignedUsers", "firstName lastName email avatar"); // Populate beneficiaries
+      .populate("createdBy", "firstName lastName email avatar")
+      .populate("assignedUsers", "firstName lastName email avatar");
 
     if (!net) {
       return res.status(404).json({ message: "Safety net not found" });
     }
 
-    // 1. Authorization Check
-    const isCreator = net.createdBy._id.toString() === req.user._id.toString();
-    const isAssigned = net.assignedUsers.some(
-      (u) => u._id.toString() === req.user._id.toString()
-    );
+    const isCreator = net.createdBy._id.toString() === userId;
+    const isAssigned = net.assignedUsers.some(u => u._id.toString() === userId);
+    const isTriggered = new Date(net.triggerDate) <= now;
 
+    // 1. Authorization: If you aren't the creator OR an assigned user, you get nothing.
     if (!isCreator && !isAssigned) {
-      return res
-        .status(403)
-        .json({ message: "Unauthorized access to this vault" });
+      return res.status(403).json({ message: "Unauthorized access" });
     }
 
-    // 2. Release Logic Check
-    const isReleased = new Date(net.triggerDate) <= new Date();
-
-    // 3. Privacy Filter: If not creator and not yet released, hide media
-    if (!isCreator && !isReleased) {
-      console.log(
-        "🔒 [LOCKED] Beneficiary accessing before triggerDate. Hiding media."
-      );
-
-      // Return the object but empty out the media arrays
-      const lockedData = net.toObject();
-      return res.status(200).json({
-        ...lockedData,
-        imageUrls: [],
-        audioUrls: [],
-        videoUrls: [],
-        isLocked: true, // Frontend flag
-        message:
-          "This vault is secured. Media will be revealed on the release date.",
+    // 2. Strict Privacy: If you ARE assigned, but NOT the creator, 
+    // and the date hasn't arrived, block the entire fetch.
+    if (!isCreator && !isTriggered) {
+      console.log("🔒 [STRICT BLOCK] Beneficiary tried to fetch before triggerDate.");
+      return res.status(403).json({ 
+        message: "This vault is sealed until the trigger date.",
+        unlockDate: net.triggerDate 
       });
     }
 
-    // 4. Return Full Data (If Creator or if Released)
+    // 3. Success: Return full data (either User is Creator OR Trigger Date has passed)
     res.status(200).json({
       ...net.toObject(),
-      isLocked: false,
+      isLocked: false, 
     });
+
   } catch (error) {
     console.error("🔥 [GET SINGLE ERROR]:", error.message);
     res.status(500).json({ message: "Error fetching safety net details" });
