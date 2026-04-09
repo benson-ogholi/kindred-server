@@ -32,7 +32,7 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: null, // Stores the Backblaze URL
     },
-    
+
     password: {
       type: String,
       required: true,
@@ -53,7 +53,7 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    
+
     socketId: {
       type: String,
       default: null,
@@ -94,13 +94,25 @@ const userSchema = new mongoose.Schema(
         default: true,
       },
     },
-    
+
     savedFamilies: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Family",
       },
     ],
+
+    // Add to your userSchema
+    status: {
+      type: String,
+      enum: ["active", "suspended"],
+      default: "active",
+    },
+    role: {
+      type: String,
+      enum: ["user", "admin", "superadmin"],
+      default: "user",
+    },
   },
   { timestamps: true }
 );

@@ -16,10 +16,15 @@ const FamilySchema = new mongoose.Schema(
         "Alumni Group",
         "Community",
         "Religious Group",
-        "Others"
+        "Others",
       ],
       required: true,
-      
+    },
+    // Add to FamilySchema
+    status: {
+      type: String,
+      enum: ["active", "suspended"],
+      default: "active",
     },
     description: {
       type: String,
@@ -50,7 +55,6 @@ const FamilySchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-
 
 FamilySchema.index({ owner: 1, members: 1 });
 

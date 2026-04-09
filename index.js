@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -21,16 +23,17 @@ const { uploadToBackblaze } = require("./utils/uploadToBackblaze");
 const familyMembers = require("./routes/familyMembers");
 const User = require("./models/User");
 const SafetyNet = require("./routes/safetyNet");
-
-require("dotenv").config();
+const adminRoutes = require("./routes/adminRoutes");
+const dashboardRouter = require('./routes/dashboardRoutes')
+const adminUserRoutes = require('./routes/adminUserRoutes')
+const adminFamilyRoutes = require('./routes/adminFamilyRoutes');
+const adminFinanceRoutes = require('./routes/adminFinanceRoutes');
 
 const app = express();
 const server = http.createServer(app);
 
-// --- 1. CRITICAL FIX: PAYLOAD SIZE ---
-// maxHttpBufferSize prevents disconnects when sending large Base64 images
 const io = new Server(server, {
-  maxHttpBufferSize: 5e7, // 50MB
+  maxHttpBufferSize: 5e7,
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
@@ -41,7 +44,6 @@ app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-// --- ROUTES ---
 app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1/families", familiesRoutes);
 app.use("/api/v1/features", featuresRoutes);
@@ -56,12 +58,17 @@ app.use("/api/v1/donations", donationsRoutes);
 app.use("/api/v1/family-content", contentRoutes);
 app.use("/api/v1/family-members", familyMembers);
 app.use("/api/v1/safety-net", SafetyNet);
+app.use("/api/v1/admin", adminRoutes);
+app.use("/api/v1/dashboard", dashboardRouter);
+app.use("/api/v1/admin-user", adminUserRoutes);
+app.use("/api/v1/admin-family", adminFamilyRoutes);
+app.use("/api/v1/admin-finance", adminFinanceRoutes);
 
+//dashboardRoutes
 app.get("/", (req, res) => {
   res.send("Kindred Auth Server Running 🚀");
 });
 
-// Helper for default text
 function getDefaultMessage(type) {
   switch (type) {
     case "image":
@@ -75,11 +82,9 @@ function getDefaultMessage(type) {
   }
 }
 
-// --- SOCKET.IO LOGIC ---
 io.on("connection", (socket) => {
   console.log(`👤 User Connected: ${socket.id}`);
 
-  // 1. User Presence Registration
   socket.on("register_user", async ({ userId }) => {
     if (!userId) return;
     try {
@@ -98,7 +103,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 2. Room Join & History
   socket.on("join_room", async (data) => {
     const { uuid, userId } = data;
     if (!uuid) return;
@@ -106,7 +110,6 @@ io.on("connection", (socket) => {
     socket.join(uuid);
 
     try {
-      // Mark messages as read when entering room
       await Message.updateMany(
         { roomUuid: uuid, receiverId: userId, isRead: false },
         { $set: { isRead: true } }
@@ -142,7 +145,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 3. Send Message (Fixed Buffer Logic)
   socket.on("send_message", async (data) => {
     const {
       uuid: roomUuid,
@@ -329,13 +331,11 @@ io.on("connection", (socket) => {
   });
   // 6. Typing Indicators
   socket.on("typing", (data) => {
-    socket
-      .to(data.uuid)
-      .emit("user_typing", {
-        roomUuid: data.uuid,
-        name: data.fullName,
-        isTyping: true,
-      });
+    socket.to(data.uuid).emit("user_typing", {
+      roomUuid: data.uuid,
+      name: data.fullName,
+      isTyping: true,
+    });
   });
 
   socket.on("stop_typing", (data) => {
