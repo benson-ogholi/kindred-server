@@ -59,17 +59,17 @@ router.post("/send-otp", async (req, res) => {
       console.log(
         `✨ No admin found. Provisioning new account for: ${cleanEmail}`
       );
+      res.status(500).json({ message: " No admin found" });
+      //   // Creating a new admin if they don't exist
+      //   admin = await Admin.create({
+      //     email: cleanEmail,
+      //     fullName: cleanEmail.split("@")[0], // Default name from email prefix
+      //     phoneNumber: `PENDING_${Date.now()}`, // Temporary placeholder to satisfy schema
+      //     role: "moderator", // Default role
+      //     isActive: true,
+      //   });
 
-      // Creating a new admin if they don't exist
-      admin = await Admin.create({
-        email: cleanEmail,
-        fullName: cleanEmail.split("@")[0], // Default name from email prefix
-        phoneNumber: `PENDING_${Date.now()}`, // Temporary placeholder to satisfy schema
-        role: "moderator", // Default role
-        isActive: true,
-      });
-
-      console.log(`✅ New Admin record created: ${admin._id}`);
+      //   console.log(`✅ New Admin record created: ${admin._id}`);
     }
 
     // 2. Generate 6-digit OTP
