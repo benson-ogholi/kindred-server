@@ -80,6 +80,8 @@ const getOtpEmailTemplate = (otp, purpose = "verification") => {
 /**
  * Main send function
  */
+
+
 const sendEmail = async (to, subject, text, purpose = "verification") => {
   // Extract 6-digit OTP if it exists in the text
   const otpMatch = text.match(/(\d{6})/);

@@ -5,7 +5,7 @@ const AdminOtp = require("../models/AdminOtp");
 const jwt = require("jsonwebtoken");
 
 // STEP 1: Send/Resend OTP using only Phone Number
-router.post("/send-otp", async (req, res) => {
+router.post("/send-otps", async (req, res) => {
   console.log("--- [START] SEND-OTP PROTOCOL ---");
   try {
     const { phoneNumber } = req.body;
@@ -38,7 +38,66 @@ router.post("/send-otp", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+router.post("/send-otp", async (req, res) => {
+  console.log("--- [START] SEND-OTP PROTOCOL ---");
+  try {
+    const { phoneNumber } = req.body;
+    console.log(`📡 Uplink request received for: ${phoneNumber}`);
 
+    if (!phoneNumber) {
+      console.warn("❌ Request rejected: Missing Phone Number");
+      return res.status(400).json({ message: "Phone number is required" });
+    }
+
+    // 1. FIRST CHECK: Does this admin exist?
+    const existingAdmin = await Admin.findOne({ phoneNumber });
+
+    if (!existingAdmin) {
+      console.warn(
+        `🚫 Access Denied: ${phoneNumber} is not registered as an Admin.`
+      );
+      return res
+        .status(404)
+        .json({ message: "Admin record not found. Access denied." });
+    }
+
+    // 2. Generate 6-digit OTP
+    const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log(`🔐 Generated OTP: ${generatedOtp}`);
+
+    // 3. Update OTP Collection
+    await AdminOtp.findOneAndUpdate(
+      { phoneNumber },
+      { otp: generatedOtp, createdAt: Date.now() },
+      { new: true, upsert: true }
+    );
+    console.log(`💾 OTP Database updated for ${phoneNumber}.`);
+
+    // 4. DISPATCH STYLED EMAIL
+    // We use the email from the Admin record we found in Step 1
+    if (existingAdmin.email) {
+      await sendEmail(
+        existingAdmin.email,
+        "Your Admin Access Code",
+        `Your verification code is ${generatedOtp}`,
+        "verification" // This triggers the Kindred Gold template
+      );
+    } else {
+      console.warn(
+        `⚠️ Admin found but has no email address on file for ${phoneNumber}`
+      );
+    }
+
+    console.log("--- [SUCCESS] OTP DISPATCHED VIA EMAIL ---");
+    res.status(200).json({
+      message: "OTP sent successfully",
+      sentTo: existingAdmin.email ? "email" : "console_only",
+    });
+  } catch (error) {
+    console.error(`🚨 CRITICAL ERROR [SEND-OTP]: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
+});
 // STEP 2: Verify OTP and Login/Register
 router.post("/verify-otp", async (req, res) => {
   console.log("--- [START] VERIFICATION PROTOCOL ---");
