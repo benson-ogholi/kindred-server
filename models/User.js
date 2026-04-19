@@ -2,27 +2,32 @@ const mongoose = require("mongoose");
 
 const userSchema = new mongoose.Schema(
   {
-    /* 👤 BASIC INFO */
-    firstName: { type: String, required: true },
-    lastName: { type: String, required: true },
-
+    /* 👤 BASIC PROFILE INFO */
+    firstName: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    lastName: {
+      type: String,
+      required: true,
+      trim: true,
+    },
     email: {
       type: String,
       required: true,
       unique: true,
       lowercase: true,
+      trim: true,
     },
-
     phone: {
       type: String,
       required: true,
     },
-
     dateOfBirth: {
-      type: String, // dd/mm/yyyy
+      type: String, // Format: dd/mm/yyyy
       required: true,
     },
-
     bio: {
       type: String,
       maxlength: 300,
@@ -30,20 +35,30 @@ const userSchema = new mongoose.Schema(
     },
     profilePicture: {
       type: String,
-      default: null, // Stores the Backblaze URL
+      default: null, // Backblaze B2 or Cloudinary URL
     },
-
     password: {
       type: String,
       required: true,
     },
 
+    /* 🛡️ ACCOUNT STATUS & SECURITY */
     isVerified: {
       type: Boolean,
       default: false,
     },
+    status: {
+      type: String,
+      enum: ["active", "suspended"],
+      default: "active",
+    },
+    role: {
+      type: String,
+      enum: ["user", "admin", "superadmin"],
+      default: "user",
+    },
 
-    /* 📲 EXPO PUSH TOKEN */
+    /* 📲 REAL-TIME & NOTIFICATIONS */
     expoPushToken: {
       type: String,
       default: null,
@@ -53,18 +68,17 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-
     socketId: {
       type: String,
       default: null,
     },
-    /* 🔐 PRIVACY SETTINGS */
+
+    /* 🔐 PRIVACY & SHARING PREFERENCES */
     privacySettings: {
       showNameInDonations: {
         type: Boolean,
         default: true,
       },
-      // Added to match the "Show my contact details" toggle
       showContactDetailsToFamily: {
         type: Boolean,
         default: true,
@@ -82,39 +96,51 @@ const userSchema = new mongoose.Schema(
       sms: {
         enabled: { type: Boolean, default: false },
       },
-
-      // Matches: "Receive donation notifications"
       donationNotifications: {
         type: Boolean,
         default: true,
       },
-      // Matches: "Receive withdrawal notifications"
       withdrawalNotifications: {
         type: Boolean,
         default: true,
       },
     },
 
+    /* 📂 RELATIONAL DATA (Heritage & Sanctuary) */
     savedFamilies: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Family",
       },
     ],
-
-    // Add to your userSchema
-    status: {
-      type: String,
-      enum: ["active", "suspended"],
-      default: "active",
-    },
-    role: {
-      type: String,
-      enum: ["user", "admin", "superadmin"],
-      default: "user",
-    },
   },
-  { timestamps: true }
+  {
+    timestamps: true, // Automatically creates createdAt and updatedAt
+  }
 );
+
+/* -----------------------------------------------------------
+   🛠️ MIDDLEWARE & TRANSFORMATIONS
+----------------------------------------------------------- */
+
+/**
+ * PROTECTION LOGIC:
+ * Automatically strips sensitive data and hides savedFamilies
+ * if the user status is 'suspended'.
+ */
+userSchema.set("toJSON", {
+  transform: (doc, ret) => {
+    // 1. Hide Families from Suspended Users
+    if (ret.status === "suspended") {
+      ret.savedFamilies = [];
+    }
+
+    // 2. Security: Never send password or internal __v to the client
+    delete ret.password;
+    delete ret.__v;
+
+    return ret;
+  },
+});
 
 module.exports = mongoose.model("User", userSchema);

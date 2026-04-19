@@ -11,3 +11,7 @@ const adminOtpSchema = new mongoose.Schema({
 });
 
 module.exports = mongoose.model('AdminOtp', adminOtpSchema);
+// Add this after module.exports = ...
+mongoose.model('AdminOtp').collection.dropIndex('phoneNumber_1').catch(() => {
+  console.log("Index already gone or never existed.");
+});

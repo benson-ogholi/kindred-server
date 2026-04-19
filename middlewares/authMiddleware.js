@@ -27,6 +27,8 @@ const protect = async (req, res, next) => {
         return res.status(401).json({ message: "User no longer exists" });
       }
 
+      console.warn(user, 'useruser')
+
       req.user = user;
       return next();
     } catch (error) {
@@ -41,4 +43,17 @@ const protect = async (req, res, next) => {
   }
 };
 
-module.exports = { protect };
+
+const checkStatus = (req, res, next) => {
+  // We assume req.user is already populated by the 'protect' middleware
+  if (req.user && req.user.status === 'suspended') {
+    return res.status(403).json({ 
+      message: "Access Denied. Your account has been suspended.",
+      isSuspended: true 
+    });
+  }
+  next();
+};
+
+
+module.exports = { protect ,checkStatus};

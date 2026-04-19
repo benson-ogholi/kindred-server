@@ -232,25 +232,23 @@ router.get("/family/:familyId", protect, async (req, res) => {
 });
 
 router.put("/:newsId", protect, async (req, res) => {
-  console.log("🟢 UPDATE NEWS HIT (NO MULTER)");
+  console.log("🟢 UPDATE NEWS HIT");
 
   try {
-    console.log("➡️ req.params:", req.params);
-    console.log("➡️ req.body:", req.body);
-    console.log("➡️ Content-Type:", req.headers["content-type"]);
-
     const news = await News.findById(req.params.newsId);
-    console.log("news.author.toString()", news.author.toString());
+    
     if (!news) {
       console.log("❌ News not found");
       return res.status(404).json({ message: "News not found" });
     }
 
-    if (req.user._id.toString()) {
-      console.log("🚫 Unauthorized update attempt");
-      return res
-        .status(403)
-        .json({ message: "Not authorized to update this news" });
+    // 🛡️ AUTHORIZATION GATE
+    // Only the person who created the post can edit it
+    const isAuthor = news.author.toString() === req.user._id.toString();
+    
+    if (!isAuthor) {
+      console.log(`🚫 Unauthorized attempt: User ${req.user._id} tried to edit Post by ${news.author}`);
+      return res.status(403).json({ message: "Access denied. You are not the author of this post." });
     }
 
     // ===== UPDATE FIELDS =====
@@ -268,11 +266,11 @@ router.put("/:newsId", protect, async (req, res) => {
     }
 
     await news.save();
-    await news.populate("author", "firstName lastName");
+    await news.populate("author", "firstName lastName profilePicture");
 
-    console.log("✅ News updated:", news._id);
-
+    console.log("✅ News updated successfully:", news._id);
     res.status(200).json({ news });
+
   } catch (error) {
     console.error("🔥 Update news error:", error);
     res.status(500).json({ message: "Failed to update news" });

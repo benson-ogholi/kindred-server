@@ -24,15 +24,13 @@ const familyMembers = require("./routes/familyMembers");
 const User = require("./models/User");
 const SafetyNet = require("./routes/safetyNet");
 const adminRoutes = require("./routes/adminRoutes");
-const dashboardRouter = require('./routes/dashboardRoutes')
-const adminUserRoutes = require('./routes/adminUserRoutes')
-const adminFamilyRoutes = require('./routes/adminFamilyRoutes');
-const adminFinanceRoutes = require('./routes/adminFinanceRoutes');
+const dashboardRouter = require("./routes/dashboardRoutes");
+const adminUserRoutes = require("./routes/adminUserRoutes");
+const adminFamilyRoutes = require("./routes/adminFamilyRoutes");
+const adminFinanceRoutes = require("./routes/adminFinanceRoutes");
 
 const app = express();
 const server = http.createServer(app);
-
-
 
 const io = new Server(server, {
   maxHttpBufferSize: 5e7,
@@ -104,49 +102,88 @@ io.on("connection", (socket) => {
       console.error("Error registering user:", err);
     }
   });
-
   socket.on("join_room", async (data) => {
+    console.log("📥 JOIN_ROOM REQUEST:", JSON.stringify(data, null, 2));
+
     const { uuid, userId } = data;
-    if (!uuid) return;
+    if (!uuid) {
+      console.log("⚠️ JOIN_ROOM FAILED: Missing uuid");
+      return;
+    }
 
     socket.join(uuid);
+    console.log(`🏠 Socket ${socket.id} joined room: ${uuid}`);
 
     try {
-      await Message.updateMany(
+      const updateResult = await Message.updateMany(
         { roomUuid: uuid, receiverId: userId, isRead: false },
         { $set: { isRead: true } }
+      );
+      console.log(
+        "📖 MESSAGES MARKED READ:",
+        JSON.stringify(updateResult, null, 2)
       );
 
       const history = await Message.find({ roomUuid: uuid })
         .sort({ timestamp: 1 })
         .lean();
 
-      socket.emit(
-        "load_messages",
-        history.map((msg) => ({
-          uuid: msg.messageUuid,
+      const mappedHistory = history.map((msg) => {
+        // Logic to ensure images and voice notes have their URLs mapped correctly
+        const isImage = msg.messageType === "image";
+        const isVoice = msg.messageType === "voice";
+
+        return {
+          uuid: msg.messageUuid || msg.uuid,
           message: msg.message,
           senderName: msg.senderName,
           senderId: msg.senderId,
-          timestamp: msg.timestamp.toISOString(),
-          messageType: msg.messageType,
-          imageuri: msg.imageuri,
-          videouri: msg.videouri,
-          audioUri: msg.audioUri,
-          duration: msg.duration,
-          status: "sent",
-        }))
-      );
+          timestamp: msg.timestamp
+            ? msg.timestamp.toISOString()
+            : new Date().toISOString(),
+          messageType: msg.messageType || "text",
 
-      io.to(uuid).emit("messages_marked_read", {
-        roomUuid: uuid,
-        readerId: userId,
+          // Validation: If it's an image, we try to find the URL in imageuri or mediaUri
+          imageuri: isImage
+            ? msg.imageuri || msg.mediaUri || undefined
+            : undefined,
+
+          // Validation: Same logic for voice notes
+          audioUri: isVoice
+            ? msg.audioUri || msg.mediaUri || undefined
+            : undefined,
+
+          videouri: msg.videouri || "",
+          duration: msg.duration || 0,
+          status: "sent",
+        };
       });
+
+      // --- CRITICAL VALIDATION LOG ---
+      const imageStatus = mappedHistory
+        .filter((m) => m.messageType === "image")
+        .map((img) => ({
+          uuid: img.uuid,
+          hasUrl: !!img.imageuri,
+          url: img.imageuri,
+        }));
+
+      if (imageStatus.length > 0) {
+        console.log(
+          "🖼️ IMAGE HISTORY VALIDATION:",
+          JSON.stringify(imageStatus, null, 2)
+        );
+      }
+
+      console.log(`📤 LOAD_MESSAGES (Count: ${mappedHistory.length})`);
+      socket.emit("load_messages", mappedHistory);
+
+      const readUpdate = { roomUuid: uuid, readerId: userId };
+      io.to(uuid).emit("messages_marked_read", readUpdate);
     } catch (err) {
       console.error("❌ Error joining room:", err);
     }
   });
-
   socket.on("send_message", async (data) => {
     const {
       uuid: roomUuid,
@@ -179,6 +216,7 @@ io.on("connection", (socket) => {
         const extension = extensionMap[messageType] || "bin";
         const fileName = `${messageType}s/${messageUuid}.${extension}`;
 
+        // UPLOAD TO BACKBLAZE
         const uploadedUrl = await uploadToBackblaze(
           fileBuffer,
           fileName,
@@ -188,6 +226,20 @@ io.on("connection", (socket) => {
         if (messageType === "image") imageuri = uploadedUrl;
         else if (messageType === "video") videouri = uploadedUrl;
         else if (messageType === "voice") audioUri = uploadedUrl;
+
+        // Log media upload success
+        console.log(
+          "✅ MEDIA UPLOADED:",
+          JSON.stringify(
+            {
+              messageType,
+              url: uploadedUrl,
+              room: roomUuid,
+            },
+            null,
+            2
+          )
+        );
       }
 
       const newMessage = new Message({
@@ -222,23 +274,32 @@ io.on("connection", (socket) => {
         duration: newMessage.duration,
       };
 
+      // DEBUG LOG: Verify the full object being sent to frontend
+      console.log(
+        "📤 OUTGOING MESSAGE:",
+        JSON.stringify(messageToSend, null, 2)
+      );
+
       io.to(roomUuid).emit("receive_message", messageToSend);
 
       const unreadCount = await Message.countDocuments({
         receiverId,
         isRead: false,
       });
+
       io.to(roomUuid).emit("unread_update", {
         roomUuid,
         unreadCount,
         lastMessage: newMessage.message,
       });
     } catch (err) {
-      console.error("Error sending message:", err);
-      socket.emit("message_error", { messageUuid, error: "Failed to send" });
+      console.error("❌ Error processing voice/media message:", err);
+      socket.emit("message_error", {
+        messageUuid,
+        error: "Media upload failed",
+      });
     }
   });
-
   // 4. Edit Message
   socket.on(
     "edit_message",
@@ -284,13 +345,14 @@ io.on("connection", (socket) => {
       }
     }
   );
+
   socket.on("get_conversations", async ({ userId }) => {
     try {
       const conversations = await Message.aggregate([
         // 1. Filter messages involving the current user
         { $match: { $or: [{ senderId: userId }, { receiverId: userId }] } },
 
-        // 2. Sort by newest first so the group picks the latest message data
+        // 2. Sort by newest first
         { $sort: { timestamp: -1 } },
 
         // 3. Group by the Room
@@ -299,13 +361,21 @@ io.on("connection", (socket) => {
             _id: "$roomUuid",
             lastMessage: { $first: "$message" },
             timestamp: { $first: "$timestamp" },
-            senderName: { $first: "$senderName" },
-            senderId: { $first: "$senderId" },
-            receiverId: { $first: "$receiverId" },
-            // Grab the profile picture from the latest message
+
+            // ID of the person who is NOT you
+            otherPersonId: {
+              $first: {
+                $cond: [
+                  { $eq: ["$senderId", userId] },
+                  "$receiverId",
+                  "$senderId",
+                ],
+              },
+            },
+
+            latestSenderName: { $first: "$senderName" },
             profilePicture: { $first: "$receiverProfilePicture" },
 
-            // 4. Calculate unreadCount: Only count if I am the receiver and isRead is false
             unreadCount: {
               $sum: {
                 $cond: [
@@ -322,9 +392,66 @@ io.on("connection", (socket) => {
             },
           },
         },
-        // 5. Final sort to keep newest conversations at the top
+
+        // 4. Convert string ID to ObjectId for lookup
+        {
+          $addFields: {
+            otherPersonObjectId: { $toObjectId: "$otherPersonId" },
+          },
+        },
+
+        // 5. Lookup the Other Person's details
+        {
+          $lookup: {
+            from: "users",
+            localField: "otherPersonObjectId",
+            foreignField: "_id",
+            as: "userDetails",
+          },
+        },
+
+        {
+          $unwind: {
+            path: "$userDetails",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+
+        // 6. Project Final Shape - REMOVED "Family Member" check
+        {
+          $project: {
+            _id: 1,
+            lastMessage: 1,
+            timestamp: 1,
+            unreadCount: 1,
+            profilePicture: 1,
+            senderId: "$otherPersonId",
+            receiverId: { $literal: userId },
+
+            // ALWAYS return the other person's real name from the User collection
+            senderName: {
+              $cond: [
+                { $ifNull: ["$userDetails", false] },
+                {
+                  $concat: [
+                    "$userDetails.firstName",
+                    " ",
+                    "$userDetails.lastName",
+                  ],
+                },
+                "$latestSenderName", // Fallback if user document is missing
+              ],
+            },
+          },
+        },
+
         { $sort: { timestamp: -1 } },
       ]);
+
+      console.log(
+        "📂 UPDATED INBOX DATA:",
+        JSON.stringify(conversations, null, 2)
+      );
 
       socket.emit("conversations_list", conversations);
     } catch (err) {
@@ -346,20 +473,27 @@ io.on("connection", (socket) => {
       .emit("user_typing", { roomUuid: data.uuid, isTyping: false });
   });
 
-  // 7. Calling Logic (WebRTC)
-  socket.on("call_user", (data) => {
-    const { userToCall, signalData, from, fromName } = data;
-    io.emit(`incoming_call_${userToCall}`, {
-      signal: signalData,
-      from,
-      fromName,
-    });
+
+
+  socket.on("start_call", ({ to, offer, fromName, fromId }) => {
+    io.to(to).emit("incoming_call", { offer, fromName, fromId });
   });
 
-  socket.on("answer_call", (data) => {
-    const { to, signal } = data;
-    io.emit(`call_accepted_${to}`, { signal });
+  // 2. User answers a call
+  socket.on("answer_call", ({ to, answer }) => {
+    io.to(to).emit("call_answered", { answer });
   });
+
+  // 3. Exchange ICE Candidates (Network info)
+  socket.on("ice_candidate", ({ to, candidate }) => {
+    io.to(to).emit("ice_candidate", { candidate });
+  });
+
+  // 4. Hang up
+  socket.on("end_call", ({ to }) => {
+    io.to(to).emit("call_ended");
+  });
+  
 
   // 8. Disconnect Handler
   socket.on("disconnect", async () => {

@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const Family = require("../models/Family");
-const { protect } = require("../middlewares/authMiddleware");
+const { protect, checkStatus } = require("../middlewares/authMiddleware");
 const { createFamilyNotifications } = require("../utils/notificationHelper");
 const User = require("../models/User");
 const UnifiedIds = require("../models/UnifiedIds");
@@ -18,7 +18,7 @@ const Contribution = require("../models/Contribution");
 const SafetyNet = require("../models/SafetyNet");
 
 // 1. CREATE A FAMILY
-router.post("/", protect, async (req, res) => {
+router.post("/", protect, checkStatus, async (req, res) => {
   try {
     const { familyName, familyType, description } = req.body;
     if (!familyName || !familyType)
@@ -46,7 +46,7 @@ router.post("/", protect, async (req, res) => {
 });
 
 // 2. GET ALL USER'S FAMILIES
-router.get("/", protect, async (req, res) => {
+router.get("/", protect, checkStatus, async (req, res) => {
   try {
     const currentUserId = req.user._id;
     const userIdStr = currentUserId.toString();
@@ -165,7 +165,7 @@ router.get("/", protect, async (req, res) => {
 });
 
 // 3. GET SINGLE FAMILY BY ID (WITH UNREAD COUNTS)
-router.get("/:id", protect, async (req, res) => {
+router.get("/:id", protect, checkStatus, async (req, res) => {
   try {
     const currentUserId = req.user._id;
     const currentUserIdStr = currentUserId.toString();
@@ -284,8 +284,15 @@ router.get("/:id", protect, async (req, res) => {
     }, {});
 
     const allContentTypes = [
-      "Family Tree", "History", "Village Tradition", "Language Lesson",
-      "King", "Patriarch", "Resolution", "My Village", "Suggestion Box",
+      "Family Tree",
+      "History",
+      "Village Tradition",
+      "Language Lesson",
+      "King",
+      "Patriarch",
+      "Resolution",
+      "My Village",
+      "Suggestion Box",
     ];
 
     const contentStatus = allContentTypes.map((type) => ({
@@ -316,7 +323,9 @@ router.get("/:id", protect, async (req, res) => {
         }
 
         const usersPair = [currentUserIdStr, memberId].sort();
-        let unified = await UnifiedIds.findOne({ users: { $size: 2, $all: usersPair } });
+        let unified = await UnifiedIds.findOne({
+          users: { $size: 2, $all: usersPair },
+        });
 
         if (!unified) {
           unified = await UnifiedIds.create({
@@ -379,7 +388,7 @@ router.get("/:id", protect, async (req, res) => {
   }
 });
 // 4. LOOKUP FAMILY BY INVITE CODE
-router.get("/invite/:inviteCode", protect, async (req, res) => {
+router.get("/invite/:inviteCode", protect, checkStatus, async (req, res) => {
   try {
     const familyDoc = await Family.findOne({
       inviteCode: req.params.inviteCode.toUpperCase(),
@@ -411,7 +420,7 @@ router.get("/invite/:inviteCode", protect, async (req, res) => {
 });
 
 // 5. UPDATE FAMILY (OWNER ONLY)
-router.put("/:id", protect, async (req, res) => {
+router.put("/:id", protect, checkStatus, async (req, res) => {
   try {
     const family = await Family.findById(req.params.id);
     if (!family || family.owner.toString() !== req.user._id.toString())
@@ -432,7 +441,7 @@ router.put("/:id", protect, async (req, res) => {
 });
 
 // 6. DELETE FAMILY (OWNER ONLY)
-router.delete("/:id", protect, async (req, res) => {
+router.delete("/:id", protect, checkStatus, async (req, res) => {
   try {
     const family = await Family.findById(req.params.id);
     if (!family || family.owner.toString() !== req.user._id.toString())
@@ -444,7 +453,7 @@ router.delete("/:id", protect, async (req, res) => {
   }
 });
 
-router.post("/new-invite/send", protect, async (req, res) => {
+router.post("/new-invite/send", protect, checkStatus, async (req, res) => {
   console.log("📩 INVITE ROUTE HIT");
   console.log("➡️ Request body:", req.body);
   console.log("👤 Inviter:", req.user?._id);
@@ -557,7 +566,7 @@ router.post("/new-invite/send", protect, async (req, res) => {
 });
 
 // 7. SEND INVITE TO USER (OWNER ONLY)
-router.post("/:familyId/invite", protect, async (req, res) => {
+router.post("/:familyId/invite", protect, checkStatus, async (req, res) => {
   try {
     const { familyId } = req.params;
     const { userId } = req.body;
@@ -587,7 +596,7 @@ router.post("/:familyId/invite", protect, async (req, res) => {
 });
 
 // 8. ACCEPT INVITE
-router.post("/:familyId/accept", protect, async (req, res) => {
+router.post("/:familyId/accept", protect, checkStatus, async (req, res) => {
   try {
     const userId = req.user._id.toString();
     const family = await Family.findById(req.params.familyId);
@@ -613,7 +622,7 @@ router.post("/:familyId/accept", protect, async (req, res) => {
 });
 
 // 9. DECLINE INVITE
-router.post("/:familyId/decline", protect, async (req, res) => {
+router.post("/:familyId/decline", protect, checkStatus, async (req, res) => {
   try {
     const userId = req.user._id.toString();
     const family = await Family.findById(req.params.familyId);
@@ -638,7 +647,7 @@ router.post("/:familyId/decline", protect, async (req, res) => {
 });
 
 // 10. REQUEST TO JOIN
-router.post("/:familyId/request", protect, async (req, res) => {
+router.post("/:familyId/request", protect, checkStatus, async (req, res) => {
   try {
     const userId = req.user._id.toString();
     const family = await Family.findById(req.params.familyId);
@@ -662,7 +671,7 @@ router.post("/:familyId/request", protect, async (req, res) => {
 });
 
 // 11. VIEW JOIN REQUESTS (OWNER ONLY)
-router.get("/:familyId/requests", protect, async (req, res) => {
+router.get("/:familyId/requests", protect, checkStatus, async (req, res) => {
   try {
     const family = await Family.findById(req.params.familyId).populate(
       "joinRequests",
@@ -677,30 +686,35 @@ router.get("/:familyId/requests", protect, async (req, res) => {
 });
 
 // 12. ACCEPT JOIN REQUEST (OWNER ONLY)
-router.post("/:familyId/requests/:userId/accept", protect, async (req, res) => {
-  try {
-    const { familyId, userId } = req.params;
-    const family = await Family.findById(familyId);
-    if (!family || family.owner.toString() !== req.user._id.toString())
-      return res.status(403).json({ message: "Unauthorized" });
+router.post(
+  "/:familyId/requests/:userId/accept",
+  protect,
+  checkStatus,
+  async (req, res) => {
+    try {
+      const { familyId, userId } = req.params;
+      const family = await Family.findById(familyId);
+      if (!family || family.owner.toString() !== req.user._id.toString())
+        return res.status(403).json({ message: "Unauthorized" });
 
-    family.members.push(userId);
-    family.joinRequests = family.joinRequests.filter(
-      (id) => id.toString() !== userId
-    );
-    await family.save();
+      family.members.push(userId);
+      family.joinRequests = family.joinRequests.filter(
+        (id) => id.toString() !== userId
+      );
+      await family.save();
 
-    await createFamilyNotifications(familyId, req.user._id, {
-      type: "FAMILY_JOIN_ACCEPTED",
-      title: "Request Accepted",
-      message: `Accepted into "${family.familyName}"`,
-      relatedId: familyId,
-    });
-    res.status(200).json({ message: "User added", family });
-  } catch (error) {
-    res.status(500).json({ message: "Server error accepting request" });
+      await createFamilyNotifications(familyId, req.user._id, {
+        type: "FAMILY_JOIN_ACCEPTED",
+        title: "Request Accepted",
+        message: `Accepted into "${family.familyName}"`,
+        relatedId: familyId,
+      });
+      res.status(200).json({ message: "User added", family });
+    } catch (error) {
+      res.status(500).json({ message: "Server error accepting request" });
+    }
   }
-});
+);
 
 // 13. DECLINE JOIN REQUEST (OWNER ONLY)
 router.post(
@@ -732,7 +746,7 @@ router.post(
 );
 
 // 14. REPLACE FAMILY MEMBERS (OWNER ONLY)
-router.put("/:familyId/members", protect, async (req, res) => {
+router.put("/:familyId/members", protect, checkStatus, async (req, res) => {
   try {
     const { familyId } = req.params;
     const { userIds } = req.body;
@@ -794,87 +808,97 @@ router.put("/:familyId/members", protect, async (req, res) => {
 });
 
 // 15. SUSPEND A USER (OWNER ONLY)
-router.post("/:familyId/suspend/:userId", protect, async (req, res) => {
-  try {
-    const { familyId, userId } = req.params;
-    const family = await Family.findById(familyId);
+router.post(
+  "/:familyId/suspend/:userId",
+  protect,
+  checkStatus,
+  async (req, res) => {
+    try {
+      const { familyId, userId } = req.params;
+      const family = await Family.findById(familyId);
 
-    if (!family) return res.status(404).json({ message: "Family not found" });
+      if (!family) return res.status(404).json({ message: "Family not found" });
 
-    // Only owner can suspend
-    if (family.owner.toString() !== req.user._id.toString())
-      return res.status(403).json({ message: "Unauthorized" });
+      // Only owner can suspend
+      if (family.owner.toString() !== req.user._id.toString())
+        return res.status(403).json({ message: "Unauthorized" });
 
-    // Cannot suspend owner
-    if (family.owner.toString() === userId)
-      return res.status(400).json({ message: "Cannot suspend owner" });
+      // Cannot suspend owner
+      if (family.owner.toString() === userId)
+        return res.status(400).json({ message: "Cannot suspend owner" });
 
-    // Check if user is a member
-    if (!family.members.includes(userId))
-      return res.status(400).json({ message: "User is not a member" });
+      // Check if user is a member
+      if (!family.members.includes(userId))
+        return res.status(400).json({ message: "User is not a member" });
 
-    // Add to suspendedMembers if not already
-    family.suspendedMembers = family.suspendedMembers || [];
-    if (!family.suspendedMembers.includes(userId)) {
-      family.suspendedMembers.push(userId);
-      await family.save();
+      // Add to suspendedMembers if not already
+      family.suspendedMembers = family.suspendedMembers || [];
+      if (!family.suspendedMembers.includes(userId)) {
+        family.suspendedMembers.push(userId);
+        await family.save();
 
-      await createFamilyNotifications(familyId, req.user._id, {
-        type: "USER_SUSPENDED",
-        title: "Member Suspended",
-        message: `User was suspended from "${family.familyName}"`,
-        relatedId: familyId,
-        receiver: userId,
+        await createFamilyNotifications(familyId, req.user._id, {
+          type: "USER_SUSPENDED",
+          title: "Member Suspended",
+          message: `User was suspended from "${family.familyName}"`,
+          relatedId: familyId,
+          receiver: userId,
+        });
+      }
+
+      res.status(200).json({
+        message: "User suspended",
+        suspendedMembers: family.suspendedMembers,
       });
+    } catch (error) {
+      console.error("Suspend user error:", error);
+      res.status(500).json({ message: "Server error suspending user" });
     }
-
-    res.status(200).json({
-      message: "User suspended",
-      suspendedMembers: family.suspendedMembers,
-    });
-  } catch (error) {
-    console.error("Suspend user error:", error);
-    res.status(500).json({ message: "Server error suspending user" });
   }
-});
+);
 
 // 16. UNSUSPEND A USER (OWNER ONLY)
-router.post("/:familyId/unsuspend/:userId", protect, async (req, res) => {
-  try {
-    const { familyId, userId } = req.params;
-    const family = await Family.findById(familyId);
+router.post(
+  "/:familyId/unsuspend/:userId",
+  protect,
+  checkStatus,
+  async (req, res) => {
+    try {
+      const { familyId, userId } = req.params;
+      const family = await Family.findById(familyId);
 
-    if (!family) return res.status(404).json({ message: "Family not found" });
+      if (!family) return res.status(404).json({ message: "Family not found" });
 
-    // Only owner can unsuspend
-    if (family.owner.toString() !== req.user._id.toString())
-      return res.status(403).json({ message: "Unauthorized" });
+      // Only owner can unsuspend
+      if (family.owner.toString() !== req.user._id.toString())
+        return res.status(403).json({ message: "Unauthorized" });
 
-    // Remove from suspendedMembers if exists
-    family.suspendedMembers = family.suspendedMembers || [];
-    if (family.suspendedMembers.includes(userId)) {
-      family.suspendedMembers = family.suspendedMembers.filter(
-        (id) => id.toString() !== userId
-      );
-      await family.save();
+      // Remove from suspendedMembers if exists
+      family.suspendedMembers = family.suspendedMembers || [];
+      if (family.suspendedMembers.includes(userId)) {
+        family.suspendedMembers = family.suspendedMembers.filter(
+          (id) => id.toString() !== userId
+        );
+        await family.save();
 
-      await createFamilyNotifications(familyId, req.user._id, {
-        type: "USER_UNSUSPENDED",
-        title: "Member Unsuspended",
-        message: `User was unsuspended in "${family.familyName}"`,
-        relatedId: familyId,
-        receiver: userId,
+        await createFamilyNotifications(familyId, req.user._id, {
+          type: "USER_UNSUSPENDED",
+          title: "Member Unsuspended",
+          message: `User was unsuspended in "${family.familyName}"`,
+          relatedId: familyId,
+          receiver: userId,
+        });
+      }
+
+      res.status(200).json({
+        message: "User unsuspended",
+        suspendedMembers: family.suspendedMembers,
       });
+    } catch (error) {
+      console.error("Unsuspend user error:", error);
+      res.status(500).json({ message: "Server error unsuspending user" });
     }
-
-    res.status(200).json({
-      message: "User unsuspended",
-      suspendedMembers: family.suspendedMembers,
-    });
-  } catch (error) {
-    console.error("Unsuspend user error:", error);
-    res.status(500).json({ message: "Server error unsuspending user" });
   }
-});
+);
 
 module.exports = router;

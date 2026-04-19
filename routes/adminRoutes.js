@@ -40,50 +40,36 @@ router.post("/send-otps", async (req, res) => {
   }
 });
 router.post("/send-otp", async (req, res) => {
-  console.log("--- [START] SEND-OTP PROTOCOL (AUTO-PROVISIONING) ---");
+  console.log("--- [START] SEND-OTP PROTOCOL ---");
   try {
     const { email } = req.body;
 
-    if (!email) {
-      console.warn("❌ Request rejected: Missing Email");
-      return res.status(400).json({ message: "Email is required" });
-    }
+    if (!email) return res.status(400).json({ message: "Email is required" });
 
     const cleanEmail = email.toLowerCase().trim();
-    console.log(`📡 Uplink request received for: ${cleanEmail}`);
 
-    // 1. CHECK/CREATE: Does this admin exist?
-    let admin = await Admin.findOne({ email: cleanEmail });
+    // 1. Check if admin exists
+    const admin = await Admin.findOne({ email: cleanEmail });
 
+    // FIX: If no admin is found, we should stop here because it's an Admin portal.
+    // If you return 500 here, the rest of the code shouldn't run.
     if (!admin) {
-      console.log(
-        `✨ No admin found. Provisioning new account for: ${cleanEmail}`
-      );
-      res.status(500).json({ message: " No admin found" });
-      //   // Creating a new admin if they don't exist
-      //   admin = await Admin.create({
-      //     email: cleanEmail,
-      //     fullName: cleanEmail.split("@")[0], // Default name from email prefix
-      //     phoneNumber: `PENDING_${Date.now()}`, // Temporary placeholder to satisfy schema
-      //     role: "moderator", // Default role
-      //     isActive: true,
-      //   });
-
-      //   console.log(`✅ New Admin record created: ${admin._id}`);
+      console.warn(`❌ Access Denied: ${cleanEmail} is not a registered admin.`);
+      return res.status(404).json({ message: "Access Denied. Admin record not found." });
     }
 
     // 2. Generate 6-digit OTP
     const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
 
-    // 3. Update OTP Collection (tracked by email)
+    // 3. Update OTP Collection
+    // Use the model to perform the upsert
     await AdminOtp.findOneAndUpdate(
       { email: cleanEmail },
       { otp: generatedOtp, createdAt: Date.now() },
-      { new: true, upsert: true }
+      { new: true, upsert: true, setDefaultsOnInsert: true }
     );
-    console.log(`💾 OTP Database updated for ${cleanEmail}.`, generatedOtp);
 
-    // 4. DISPATCH STYLED EMAIL
+    // 4. DISPATCH EMAIL
     await sendEmail(
       cleanEmail,
       "Your Admin Access Code",
@@ -94,11 +80,11 @@ router.post("/send-otp", async (req, res) => {
     console.log(`--- [SUCCESS] OTP SENT TO ${cleanEmail} ---`);
     res.status(200).json({
       message: "OTP sent successfully",
-      sentTo: cleanEmail,
-      isNewUser: !admin.createdAt, // Simple flag for the frontend if needed
+      sentTo: cleanEmail
+      // Removed admin.createdAt check because if code reaches here, admin exists.
     });
   } catch (error) {
-    console.error(`🚨 CRITICAL ERROR [SEND-OTP]: ${error.message}`);
+    console.error(`🚨 CRITICAL ERROR: ${error.message}`);
     res.status(500).json({ error: error.message });
   }
 });
