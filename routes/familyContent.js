@@ -16,7 +16,8 @@ const { uploadToBackblaze } = require("../utils/uploadToBackblaze");
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB per file
+    fileSize: 50 * 1024 * 1024,  // 50MB per file binary
+    fieldSize: 20 * 1024 * 1024, // 20MB for large text strings (e.g., descriptions, base64)
   },
 });
 

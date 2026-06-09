@@ -16,6 +16,7 @@ const sendInviteEmail = require("../utils/sendInviteEmail");
 const DonationCampaign = require("../models/DonationCampaign");
 const Contribution = require("../models/Contribution");
 const SafetyNet = require("../models/SafetyNet");
+const { sendPushNotificationToUser } = require("../utils/notifyUser");
 
 // 1. CREATE A FAMILY
 router.post("/", protect, checkStatus, async (req, res) => {
@@ -33,6 +34,7 @@ router.post("/", protect, checkStatus, async (req, res) => {
       inviteCode: Math.random().toString(36).substring(2, 10).toUpperCase(),
     });
 
+    
     const populatedFamily = await Family.findById(newFamily._id)
       .populate("owner", "firstName lastName email profilePicture")
       .populate("members", "firstName lastName email profilePicture");

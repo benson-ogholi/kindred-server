@@ -28,6 +28,14 @@ const dashboardRouter = require("./routes/dashboardRoutes");
 const adminUserRoutes = require("./routes/adminUserRoutes");
 const adminFamilyRoutes = require("./routes/adminFamilyRoutes");
 const adminFinanceRoutes = require("./routes/adminFinanceRoutes");
+const pr_auth = require("./routes/pr/pr.auth.router");
+const pr_user = require("./routes/pr/pr.user.router");
+const pr_parcel = require("./routes/pr/pr.parcel.router");
+const pr_parcel_requester = require("./routes/pr/pr.parcel.requester");
+const pr_rider_offer = require("./routes/pr/pr.ride.offer.router");
+const pr_negs = require("./routes/pr/pr.negotiation.router");
+const NegotiationMessage = require("./models/padiman_route_models/NegotiationMessage");
+const pr_pay = require('./routes/pr/payment.routes')
 
 const app = express();
 const server = http.createServer(app);
@@ -64,6 +72,14 @@ app.use("/api/v1/admin-user", adminUserRoutes);
 app.use("/api/v1/admin-family", adminFamilyRoutes);
 app.use("/api/v1/admin-finance", adminFinanceRoutes);
 
+app.use("/api/v1/padiman_route/auth", pr_auth);
+app.use("/api/v1/padiman_route/user", pr_user);
+app.use("/api/v1/padiman_route/send_a_delivery", pr_parcel);
+app.use("/api/v1/padiman_route/deliver_a_delivery", pr_parcel_requester);
+app.use("/api/v1/padiman_route/ride-offers", pr_rider_offer);
+app.use("/api/v1/padiman_route/negs", pr_negs);
+app.use("/api/v1/padiman_route/payments", pr_pay);
+
 //dashboardRoutes
 app.get("/", (req, res) => {
   res.send("Kindred Auth Server Running 🚀");
@@ -82,8 +98,173 @@ function getDefaultMessage(type) {
   }
 }
 
+const rooms = new Map();
+
 io.on("connection", (socket) => {
   console.log(`👤 User Connected: ${socket.id}`);
+
+  const getCleanId = (id) => {
+    if (!id) return null;
+    if (typeof id === "string") return id.trim();
+    if (typeof id === "object" && id !== null) {
+      return (
+        id.id ||
+        id._id ||
+        id.negotiationId ||
+        id.negotiation?.id ||
+        id.negotiation?._id ||
+        String(id)
+      );
+    }
+    return String(id).trim();
+  };
+
+  // === JOIN CHAT ===
+// === JOIN CHAT ===
+socket.on("join-pr-chat", async ({ negotiationId, userPayload }) => {
+  console.log("DEBUG: join-pr-chat triggered for:", negotiationId);
+
+  // 1. Validation
+  if (!negotiationId || !mongoose.Types.ObjectId.isValid(negotiationId)) {
+    console.error(`❌ Invalid Negotiation ID: ${negotiationId}`);
+    return socket.emit("error", { message: "Invalid negotiation ID format" });
+  }
+
+  if (!userPayload?.id) {
+    return socket.emit("error", { message: "userPayload with id required" });
+  }
+
+  // 2. Join the room
+  socket.join(negotiationId);
+
+  // 3. Initialize room memory if it doesn't exist
+  if (!rooms.has(negotiationId)) {
+    rooms.set(negotiationId, { users: new Map(), messages: [] });
+  }
+
+  // 4. Track the user
+  const room = rooms.get(negotiationId);
+  room.users.set(socket.id, userPayload);
+
+  try {
+    // 5. FETCH ALL MESSAGES FROM DB
+    // Sort by createdAt ascending so the conversation flow is correct
+    const allMessages = await NegotiationMessage.find({ negotiation: negotiationId })
+      .sort({ createdAt: 1 })
+      .populate("sender", "name fullName email profileImage");
+
+    // Format the messages to match the structure expected by your frontend
+    const formattedMessages = allMessages.map(msg => ({
+      id: msg._id.toString(),
+      negotiation: msg.negotiation.toString(),
+      sender: msg.sender,
+      text: msg.text,
+      attachments: msg.attachments || [],
+      isRead: msg.isRead || false,
+      readBy: msg.readBy || [],
+      timestamp: msg.createdAt,
+      createdAt: msg.createdAt,
+    }));
+
+    // Update in-memory room storage
+    room.messages = formattedMessages;
+
+    console.log(`✅ User ${userPayload.id} joined. Sending ${formattedMessages.length} messages.`);
+
+    // 6. Notify the sender WITH full history
+    socket.emit("room-joined", {
+      users: Array.from(room.users.values()),
+      messages: formattedMessages,
+    });
+
+    // 7. Notify others in the room
+    socket.to(negotiationId).emit("user-joined", {
+      userPayload,
+      socketId: socket.id,
+    });
+  } catch (err) {
+    console.error("❌ Error fetching chat history:", err);
+    socket.emit("error", { message: "Failed to load chat history" });
+  }
+});
+
+  // === SEND MESSAGE ===
+  // Inside pr-chat-message
+  socket.on("pr-chat-message", async (payload) => {
+    console.log("📥 [Server] Received 'pr-chat-message' payload:", payload);
+
+    const { negotiation, text, attachments = [] , senderId} = payload;
+    const cleanNegotiationId = getCleanId(negotiation);
+
+    console.log(`🔍 [Server] Cleaned Negotiation ID: ${cleanNegotiationId}`);
+
+    try {
+      // Check sender
+      const finalSender = senderId;
+      console.log(`👤 [Server] Identified Sender ID: ${finalSender}`);
+
+      if (!finalSender) {
+        console.error(
+          "❌ [Server] Message rejected: No user session (socket.userPayload) found."
+        );
+        return socket.emit("error", { message: "User session missing" });
+      }
+
+      if (!cleanNegotiationId || !text?.trim()) {
+        console.error(
+          "❌ [Server] Message rejected: Missing ID or text content."
+        );
+        return socket.emit("error", {
+          message: "negotiation and text required",
+        });
+      }
+
+      console.log("💾 [Server] Attempting to save message to DB...");
+      const chatMessage = await NegotiationMessage.create({
+        negotiation: cleanNegotiationId,
+        sender: finalSender,
+        text: text.trim(),
+        attachments: Array.isArray(attachments) ? attachments : [],
+      });
+
+      const populated = await chatMessage.populate({
+        path: "sender",
+        select: "name fullName email profileImage",
+      });
+
+      const messagePayload = {
+        id: populated._id.toString(),
+        negotiation: populated.negotiation.toString(),
+        sender: populated.sender,
+        text: populated.text,
+        attachments: populated.attachments || [],
+        isRead: populated.isRead || false,
+        readBy: populated.readBy || [],
+        timestamp: populated.createdAt,
+        createdAt: populated.createdAt,
+      };
+
+      console.log(
+        "✅ [Server] Message saved and populated. Emitting to room:",
+        cleanNegotiationId
+      );
+
+      // Broadcast back to the room
+      io.to(cleanNegotiationId).emit("pr-chat-message", messagePayload);
+
+      // Acknowledge to the sender
+      socket.emit("messageSent", { success: true, message: messagePayload });
+      console.log(
+        "🚀 [Server] 'pr-chat-message' broadcasted and 'messageSent' acknowledged."
+      );
+    } catch (err) {
+      console.error("❌ [Server] Critical Database/Message error:", err);
+      socket.emit("error", {
+        message: "Failed to send message",
+        details: err.message,
+      });
+    }
+  });
 
   socket.on("register_user", async ({ userId }) => {
     if (!userId) return;
@@ -473,10 +654,21 @@ io.on("connection", (socket) => {
       .emit("user_typing", { roomUuid: data.uuid, isTyping: false });
   });
 
-
-
-  socket.on("start_call", ({ to, offer, fromName, fromId }) => {
+  socket.on("start_call", async ({ to, offer, fromName, fromId }) => {
+    // 1. Immediate Signaling (for users currently in the app)
     io.to(to).emit("incoming_call", { offer, fromName, fromId });
+
+    // await sendPushNotificationToUser(to, {
+    //   title: "Incoming Call",
+    //   body: `${fromName} is calling you...`,
+    //   router: "/calls/CallScreen", // Or wherever your call UI is
+    //   data: {
+    //     type: "VOIP_CALL",
+    //     offer,
+    //     fromName,
+    //     fromId,
+    //   },
+    // });
   });
 
   // 2. User answers a call
@@ -493,7 +685,6 @@ io.on("connection", (socket) => {
   socket.on("end_call", ({ to }) => {
     io.to(to).emit("call_ended");
   });
-  
 
   // 8. Disconnect Handler
   socket.on("disconnect", async () => {
