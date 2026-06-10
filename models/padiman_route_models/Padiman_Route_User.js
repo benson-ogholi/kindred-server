@@ -29,6 +29,41 @@ const padimanRouteUserSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  isDriverPending: {
+    type: Boolean,
+    default: false,
+  },
+  isDriverSuspended: {
+    type: Boolean,
+    default: false,
+  },
+  isDriverRejected: {
+    type: Boolean,
+    default: false,
+  },
+  gender: {
+    type: String,
+    enum: ["male", "female", "other", "prefer_not_to_say"],
+    default: null,
+  },
+  address: {
+    type: String,
+    trim: true,
+  },
+  occupation: {
+    type: String,
+    trim: true,
+  },
+  driverLicenseNumber: {
+    type: String,
+    trim: true,
+    sparse: true, // Allows null/undefined for non-drivers
+  },
+  // ====================================================
+  profileImage: {
+    type: String,
+    default: null,
+  },
   password: {
     type: String,
     required: [true, "Password is required"],
@@ -50,19 +85,15 @@ const padimanRouteUserSchema = new mongoose.Schema({
 });
 
 // Pre-save hook: Hash password before saving to the database
-// Pre-save hook: Simplified and error-safe
-// Pre-save hook: Use this exact syntax
 padimanRouteUserSchema.pre("save", async function () {
-  // 1. If password isn't modified, we don't need to do anything
   if (!this.isModified("password")) {
     return;
   }
 
-  // 2. Hash the password
-  // Mongoose automatically waits for this promise to resolve
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
 });
+
 // Method to compare passwords during login authentication
 padimanRouteUserSchema.methods.comparePassword = async function (
   candidatePassword

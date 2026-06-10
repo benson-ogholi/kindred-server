@@ -36,6 +36,11 @@ const pr_rider_offer = require("./routes/pr/pr.ride.offer.router");
 const pr_negs = require("./routes/pr/pr.negotiation.router");
 const NegotiationMessage = require("./models/padiman_route_models/NegotiationMessage");
 const pr_pay = require('./routes/pr/payment.routes')
+const pr_notify = require('./routes/pr/pr.notification.router')
+const pr_wallet = require('./routes/pr/pr.wallet')
+const pr_driver = require('./routes/pr/pr.driver.router')
+const pr_admin = require('./routes/pr/admin.auth.router')
+const pr_admin_data = require('./routes/pr/admin')
 
 const app = express();
 const server = http.createServer(app);
@@ -79,7 +84,12 @@ app.use("/api/v1/padiman_route/deliver_a_delivery", pr_parcel_requester);
 app.use("/api/v1/padiman_route/ride-offers", pr_rider_offer);
 app.use("/api/v1/padiman_route/negs", pr_negs);
 app.use("/api/v1/padiman_route/payments", pr_pay);
-
+app.use("/api/v1/padiman_route/notifications", pr_notify);
+app.use("/api/v1/padiman_route/wallet", pr_wallet);
+app.use("/api/v1/padiman_route/driver", pr_driver);
+app.use("/api/v1/padiman_route/admin", pr_admin);
+app.use("/api/v1/padiman_route/admin/data", pr_admin_data);
+//pr_driver
 //dashboardRoutes
 app.get("/", (req, res) => {
   res.send("Kindred Auth Server Running 🚀");

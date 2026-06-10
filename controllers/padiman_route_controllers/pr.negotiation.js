@@ -1,6 +1,7 @@
 const Negotiation = require("../../models/padiman_route_models/Negotiation");
 const Parcel_Request = require("../../models/padiman_route_models/Parcel_Request");
 const RideOffer = require("../../models/padiman_route_models/RideOffer");
+const { sendNotification } = require("../../utils/pr/pr_push");
 
 // Create a new negotiation
 exports.createNegotiation = async (req, res) => {
@@ -21,7 +22,7 @@ exports.createNegotiation = async (req, res) => {
       serviceType,
     });
 
-    // 🔍 Deduplication Check: Look for existing negotiations between these exact parties for this service
+    // 🔍 Deduplication Check: Look for existing negotiations...
     console.log(
       "🕵️ [DUPLICATE CHECK] Searching for existing matching negotiation tracks..."
     );
@@ -29,31 +30,23 @@ exports.createNegotiation = async (req, res) => {
       service: service,
       negotiator: negotiatorId,
       serviceProvider: serviceProvider,
-    }).sort({ createdAt: 1 }); // Sort oldest to newest
+    }).sort({ createdAt: 1 });
 
     if (existingNegotiations.length > 0) {
       console.log(
         `⚠️ [DUPLICATE DETECTED] Found ${existingNegotiations.length} pre-existing records for this channel.`
       );
 
-      // Use the very first one created as the absolute source of truth
       const primaryNegotiation = existingNegotiations[0];
-      console.log(
-        `👑 [SOURCE OF TRUTH] Keeping original negotiation document ID: ${primaryNegotiation._id}`
-      );
 
-      // If there are accidental redundant records created beyond the first one, purge them permanently
+      // Purge redundant records (your existing logic)
       if (existingNegotiations.length > 1) {
         const redundantIds = existingNegotiations
           .slice(1)
           .map((neg) => neg._id);
-        console.log(
-          `🚨 [DB PURGE] Removing ${redundantIds.length} redundant duplicate records from collection...`
-        );
 
         await Negotiation.deleteMany({ _id: { $in: redundantIds } });
 
-        // Scrub those redundant references entirely out of your target models arrays too
         if (serviceType === "offer_a_ride") {
           await RideOffer.findByIdAndUpdate(service, {
             $pull: { negotiations: { $in: redundantIds } },
@@ -63,25 +56,19 @@ exports.createNegotiation = async (req, res) => {
             $pull: { negotiations: { $in: redundantIds } },
           });
         }
-        console.log(
-          "🧹 [DB PURGE COMPLETE] Redundant references completely erased."
-        );
       }
 
-      // Return the populated original track instantly so the frontend can route to it gracefully
       const populatedOriginal = await primaryNegotiation.populate([
         { path: "negotiator", select: "name email profileImage" },
         { path: "serviceProvider", select: "name email profileImage" },
         { path: "service" },
       ]);
 
-      console.log(
-        "🎉 [NEGOTIATION RECOVERY] Returning 200 JSON payload with original record."
-      );
+      console.log("🎉 [NEGOTIATION RECOVERY] Returning existing record.");
       return res.status(200).json(populatedOriginal);
     }
 
-    // 3. Create a brand new negotiation record if none existed before
+    // 3. Create a brand new negotiation record
     console.log(
       "📝 [DB OPERATIONS] No track found. Creating brand new Negotiation document..."
     );
@@ -97,66 +84,63 @@ exports.createNegotiation = async (req, res) => {
       newNegotiation._id
     );
 
-    // 4. Update the relevant model's tracking array safely
+    // 4. Update the relevant model's tracking array
     console.log(`🔀 [ROUTING UPDATE] Evaluating serviceType: "${serviceType}"`);
 
     if (serviceType === "offer_a_ride") {
-      console.log(
-        `🎯 [SCHEMA MATCH FOUND] Service type matches "offer_a_ride". Target ID: ${service}`
-      );
-
       const updatedRide = await RideOffer.findByIdAndUpdate(
         service,
-        { $addToSet: { negotiations: newNegotiation._id } }, // $addToSet guarantees uniqueness over $push
+        { $addToSet: { negotiations: newNegotiation._id } },
         { new: true }
       );
-
       if (updatedRide) {
-        console.log(
-          "🔹 [RIDE MATCH SUCCESS] RideOffer document updated successfully."
-        );
-      } else {
-        console.log(
-          `⚠️ [RIDE MATCH FAILED] Target RideOffer document with ID ${service} not found.`
-        );
+        console.log("🔹 [RIDE MATCH SUCCESS] RideOffer updated.");
       }
     } else if (serviceType === "deliver_a_parcel") {
-      console.log(
-        `🎯 [SCHEMA MATCH FOUND] Service type matches "deliver_a_parcel". Target ID: ${service}`
-      );
-
       const updatedParcel = await Parcel_Request.findByIdAndUpdate(
         service,
-        { $addToSet: { negotiations: newNegotiation._id } }, // $addToSet guarantees uniqueness over $push
+        { $addToSet: { negotiations: newNegotiation._id } },
         { new: true }
       );
-
       if (updatedParcel) {
-        console.log(
-          "🔹 [PARCEL MATCH SUCCESS] Parcel_Request document updated successfully."
-        );
-      } else {
-        console.log(
-          `⚠️ [PARCEL MATCH FAILED] Target Parcel_Request document with ID ${service} not found.`
-        );
+        console.log("🔹 [PARCEL MATCH SUCCESS] Parcel_Request updated.");
       }
-    } else {
-      console.log(
-        `⚠️ [UNKNOWN TYPE] Warning: serviceType "${serviceType}" did not match any operational model.`
-      );
     }
 
-    // 5. Populate and return response
-    console.log(
-      "🔄 [POPULATE RELATIONSHIPS] Populating reference trees for response schema..."
-    );
+    // 5. Populate for response
+    console.log("🔄 [POPULATE RELATIONSHIPS] Populating reference trees...");
     const populatedNegotiation = await newNegotiation.populate([
       { path: "negotiator", select: "name email profileImage" },
       { path: "serviceProvider", select: "name email profileImage" },
       { path: "service" },
     ]);
-    console.log("🎉 [NEGOTIATION COMPLETE] Returning 201 JSON payload.");
 
+    // ====================== NOTIFY SERVICE PROVIDER ======================
+    console.log(
+      `🛎️ [NOTIFICATION] Sending Push + Email to Service Provider: ${serviceProvider}`
+    );
+
+    await sendNotification(serviceProvider, {
+      title: "New Negotiation Request",
+      body: `You have a new negotiation request on your ${
+        serviceType === "offer_a_ride"
+          ? "ride offer"
+          : "parcel delivery request"
+      }.`,
+      type: "NEGOTIATION",
+      router:
+        serviceType === "offer_a_ride"
+          ? "/(details)/ride"
+          : "/(details)/details",
+      data: {
+        negotiationId: newNegotiation._id.toString(),
+        serviceId: service ? service.toString() : null, // Ensured
+        serviceType: serviceType,
+      },
+    });
+    // =====================================================================
+
+    console.log("🎉 [NEGOTIATION COMPLETE] Returning 201 JSON payload.");
     res.status(201).json(populatedNegotiation);
   } catch (err) {
     console.error(
@@ -167,16 +151,52 @@ exports.createNegotiation = async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 };
+
 // Update status to 'ride cancelled'
 exports.cancelRide = async (req, res) => {
+  console.log(`🚀 [CANCEL RIDE START] ID: ${req.params.id}`);
   try {
     const updated = await Negotiation.findByIdAndUpdate(
       req.params.id,
       { status: "ride cancelled" },
       { new: true }
     );
+
+    if (!updated) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Negotiation record not found" });
+    }
+
+    // ====================== SEND CANCELLATION NOTIFICATIONS ======================
+    // Determine the counterparty who needs to know about the cancellation
+    const actingUser = req.user ? req.user.toString() : null;
+    const recipientId =
+      actingUser === updated.negotiator.toString()
+        ? updated.serviceProvider
+        : updated.negotiator;
+
+    console.log(
+      `🛎️ [NOTIFICATION] Dispatched ride cancellation alert to user: ${recipientId}`
+    );
+
+    await sendNotification(recipientId, {
+      title: "Ride Cancelled",
+      body: "An active negotiation track has been marked as cancelled by the counterparty.",
+      type: "NEGOTIATION",
+      router: "/(screens)/wallet",
+      data: {
+        negotiationId: updated._id.toString(),
+        serviceId: updated.service ? updated.service.toString() : null, // Ensured
+        serviceType: updated.serviceType,
+        status: "ride cancelled",
+      },
+    });
+    // =============================================================================
+
     res.json(updated);
   } catch (err) {
+    console.error("💥 [CANCEL RIDE FAILED] Error details:", err.message);
     res.status(400).json({ error: err.message });
   }
 };
@@ -213,6 +233,36 @@ exports.updateNegotiation = async (req, res) => {
       "✅ [UPDATE SUCCESS] Result:",
       JSON.stringify(updated, null, 2)
     );
+
+    // ====================== SEND STATUS/PRICING UPDATE NOTIFICATION ======================
+    // Fire notifications conditionally if status or price-altering updates are pushed through
+    const actingUser = req.user ? req.user.toString() : null;
+    const recipientId =
+      actingUser === updated.negotiator.toString()
+        ? updated.serviceProvider
+        : updated.negotiator;
+
+    console.log(
+      `🛎️ [NOTIFICATION] Relaying status synchronization update payload to: ${recipientId}`
+    );
+
+    await sendNotification(recipientId, {
+      title: "Negotiation Updated",
+      body: `Your active offer status details have been modified to: ${updated.status}.`,
+      type: "NEGOTIATION",
+      router:
+        updated.serviceType === "offer_a_ride"
+          ? "/(details)/ride"
+          : "/(details)/details",
+      data: {
+        negotiationId: updated._id.toString(),
+        serviceId: updated.service ? updated.service.toString() : null, // Ensured
+        serviceType: updated.serviceType,
+        status: updated.status,
+      },
+    });
+    // =====================================================================================
+
     res.status(200).json({ success: true, data: updated });
   } catch (err) {
     console.error("💥 [UPDATE FAILED] Error details:", err.message);

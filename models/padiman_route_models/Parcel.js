@@ -4,7 +4,7 @@ const parcelSchema = new mongoose.Schema(
   {
     requestedBy: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
+      ref: "PadimanRouteUser",
       required: true,
     },
     route: {

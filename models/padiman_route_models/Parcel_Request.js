@@ -2,7 +2,11 @@ const mongoose = require("mongoose");
 
 const parcelRequestSchema = new mongoose.Schema(
   {
-    user: { type: mongoose.Schema.Types.ObjectId, ref: "PadimanRouteUser", required: true },
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "PadimanRouteUser",
+      required: true,
+    },
     pickupAddress: { type: String, required: true },
     destinationCity: { type: String, required: true },
     properties: {
@@ -26,8 +30,6 @@ const parcelRequestSchema = new mongoose.Schema(
       default: "pending",
     },
     notes: { type: String },
-    
-    // Updated from String to an array of ObjectIds referencing the Negotiation model
     negotiations: [
       {
         type: mongoose.Schema.Types.ObjectId,
