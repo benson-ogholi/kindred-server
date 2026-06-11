@@ -1,3 +1,4 @@
+const JoinRide = require("../../models/padiman_route_models/JoinRide");
 const Parcel = require("../../models/padiman_route_models/Parcel");
 
 exports.createParcelBooking = async (req, res) => {
@@ -14,6 +15,77 @@ exports.createParcelBooking = async (req, res) => {
   } catch (error) {
     console.error("[BOOKING ERROR]", error);
     res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+exports.createJoinRide = async (req, res) => {
+  console.log(`🚀 [JOIN RIDE CREATION] Initialized by User: ${req.user}`);
+
+  try {
+    const userId = req.user; // Set via your authentication middleware
+    const { route, schedule, notes } = req.body;
+
+    // 1. Structural Validation
+    if (!route || !route.pickupAddress || !route.deliveryAddress) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Missing complete routing parameters. Both pickup and delivery addresses are required.",
+      });
+    }
+
+    if (!schedule || !schedule.type) {
+      return res.status(400).json({
+        success: false,
+        message: "Schedule type (e.g., 'immediate', 'scheduled') is required.",
+      });
+    }
+
+    // 2. Schedule Date Parsing safely
+    let parsedDate = new Date(); // Fallback default to 'now' for immediate booking
+    if (schedule.date) {
+      parsedDate = new Date(schedule.date);
+      if (isNaN(parsedDate.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message: "Provided schedule date string is an invalid ISO format.",
+        });
+      }
+    }
+
+    // 3. Document Instantiation
+    const newJoinRide = new JoinRide({
+      requestedBy: userId,
+      route: {
+        pickupAddress: route.pickupAddress,
+        deliveryAddress: route.deliveryAddress,
+      },
+      schedule: {
+        type: schedule.type,
+        date: parsedDate,
+      },
+      notes: notes || "",
+      status: "pending", // Schema fallback safety assurance
+    });
+
+    // 4. Persistence Execution
+    const savedJoinRide = await newJoinRide.save();
+
+    console.log(
+      `✅ [JOIN RIDE CREATED SUCCESS]: Node Registered with ID ${savedJoinRide._id}`
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Ride Request logged successfully.",
+      data: savedJoinRide,
+    });
+  } catch (error) {
+    console.error("💥 [JOIN RIDE CRITICAL FAILURE]:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error registering your ride lane request.",
+    });
   }
 };
 

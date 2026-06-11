@@ -29,4 +29,5 @@ const NegotiationSchema = new mongoose.Schema({
   deliveryDetails: { type: String }
 }, { timestamps: true });
 
+
 module.exports = mongoose.model('Negotiation', NegotiationSchema);

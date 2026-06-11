@@ -11,6 +11,10 @@ const walletSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  withdrawableBalance: {
+    type: Number,
+    default: 0,
+  },
   earnings: [
     {
       payment: { type: mongoose.Schema.Types.ObjectId, ref: "Payment" },
@@ -30,6 +34,11 @@ const walletSchema = new mongoose.Schema({
       reference: String, // Paystack reference
       source: String, // e.g., "deliver_a_parcel"
       createdAt: { type: Date, default: Date.now },
+      status: {
+        type: String,
+        enum: ["pending", "success", "failed"],
+        default: "pending",
+      },
     },
   ],
   withdrawals: [

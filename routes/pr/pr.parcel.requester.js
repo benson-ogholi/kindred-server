@@ -6,7 +6,7 @@ const {
   getRequestById,
   updateRequest,
   deleteRequest,
-  getAllGlobalRequests
+  getAllGlobalRequests,
 } = require("../../controllers/padiman_route_controllers/pr.parcel.requester.controller");
 const { protect } = require("../../middlewares/pr/pr.authMiddleware");
 
@@ -20,5 +20,6 @@ router
   .put(updateRequest)
   .delete(deleteRequest);
 
-router.get("/getAllRequests/all", getAllGlobalRequests); // Static route first
+router.get("/all-this/:id", protect, getAllGlobalRequests);
+
 module.exports = router;

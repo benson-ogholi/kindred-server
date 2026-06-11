@@ -414,6 +414,7 @@ exports.getAllAdminCommissions = async (req, res) => {
 // @desc    Approve or Reject a specific withdrawal item
 // @route   PUT /api/admin/withdrawals/:id/status
 // @access  Private (Admin Only)
+// @access  Private (Admin Only)
 exports.updateWithdrawalStatus = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -456,9 +457,17 @@ exports.updateWithdrawalStatus = async (req, res) => {
       });
     }
 
-    // If administrative action is rejected, refund back to their active wallet ledger balance
+    // If administrative action is rejected/failed, refund the amount completely
     if (status === "failed") {
+      // Refund standard cumulative balance ledger
       wallet.balance += withdrawalItem.amount;
+
+      // Ensure withdrawable balance tracker is present as a fallback number type
+      if (typeof wallet.withdrawableBalance !== "number") {
+        wallet.withdrawableBalance = 0;
+      }
+      // Refund clear withdrawable balance layer so they can request another checkout
+      wallet.withdrawableBalance += withdrawalItem.amount;
     }
 
     // Commit state variables on the wallet subdocument
@@ -503,7 +512,6 @@ exports.updateWithdrawalStatus = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
 // @desc    Get dynamic metrics, time-series graphs, and cross-domain comparisons
 // @route   GET /api/admin/dashboard-statistics
 // @access  Private (Admin Only)

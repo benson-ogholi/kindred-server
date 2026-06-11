@@ -1,5 +1,7 @@
 const mongoose = require("mongoose");
 const RideOffer = require("../../models/padiman_route_models/RideOffer");
+const Negotiation = require("../../models/padiman_route_models/Negotiation");
+const JoinRide = require("../../models/padiman_route_models/JoinRide");
 
 // CREATE: Initiate a new ride manifest
 exports.createRide = async (req, res) => {
@@ -19,7 +21,7 @@ exports.createRide = async (req, res) => {
       availableSeats,
       estimatedFare,
       status,
-      notes, 
+      notes,
     } = req.body;
 
     // === AUTH CHECK ===
@@ -141,128 +143,104 @@ exports.getAllRides = async (req, res) => {
   try {
     console.log("[RIDE CONTROLLER] Fetching all active transit pipelines...");
 
-    // Populate driver details and exclude the password field
-    const rides = await RideOffer.find({ status: "active" })
-      .populate("driver", "fullName phone email isVerified profileImage")
-      .sort({ createdAt: -1 });
+    const userId = req.user; // Get logged-in user from protect middleware
 
-    console.log(`[RIDE CONTROLLER] Found ${rides.length} active pipelines.`);
-
-    res.status(200).json({ success: true, count: rides.length, data: rides });
-  } catch (error) {
-    console.error("[RIDE CONTROLLER ERROR] Fetch All Failed:", error.message);
-    res
-      .status(500)
-      .json({ success: false, message: "Error retrieving transit pipelines." });
-  }
-};
-
-// GET ONE: Retrieve a specific ride offer with driver details and sanitized negotiation matrices
-exports.getRideById = async (req, res) => {
-  console.log(
-    `🔍 [GET RIDE BY ID START] Fetching details for manifest: ${req.params.id}`
-  );
-
-  try {
-    // 1. Structural Format Check using Native Mongoose Validator
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      console.log(
-        `⚠️ [VALIDATION FAILURE] Provided ID "${req.params.id}" fails structural format checks.`
-      );
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid ID format" });
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "User not authenticated",
+      });
     }
 
-    console.log(
-      "📝 [DB QUERY] Running findById and resolving relationship reference paths..."
-    );
-    // Populate driver identity and negotiation child collections
-    let ride = await RideOffer.findById(req.params.id)
+    // 1. Find all negotiations where this user is the negotiator
+    const relevantNegotiations = await Negotiation.find({
+      negotiator: userId,
+    }).select("service status agreedAmount isConfirmed isPaid");
+
+    // Create fast lookup map: rideId (service) → negotiation
+    const negotiationMap = new Map();
+    relevantNegotiations.forEach((neg) => {
+      if (neg.service) {
+        negotiationMap.set(neg.service.toString(), neg);
+      }
+    });
+
+    // 2. Fetch all active RideOffers EXCLUDING the ones created by the logged-in user
+    let rides = await RideOffer.find({
+      status: "active",
+      //driver: { $ne: userId }, // <-- EXCLUDE OWN CREATED RIDE OFFERS HERE
+    })
+      .sort({ createdAt: -1 })
       .populate("driver", "fullName phone email isVerified profileImage")
       .populate({
         path: "negotiations",
         populate: [
-          { path: "negotiator", select: "fullName email phone profileImage" },
+          {
+            path: "negotiator",
+            select: "fullName phone email isVerified profileImage",
+          },
           {
             path: "serviceProvider",
-            select: "fullName email phone profileImage",
+            select: "fullName phone email isVerified profileImage",
           },
         ],
       });
 
-    if (!ride) {
-      console.log(
-        `❌ [NOT FOUND] Manifest ${req.params.id} could not be matched inside the collection.`
-      );
-      return res
-        .status(404)
-        .json({ success: false, message: "Manifest not found." });
-    }
+    // 3. Enrich each ride request
+    rides = rides.map((ride) => {
+      const rideObj = ride.toObject ? ride.toObject() : { ...ride };
 
-    // Data Evaluation Logs
-    console.log("📊 [DATA INSIGHT] Document evaluation details:");
-    console.log(
-      `    • Driver Profile: ${
-        ride.driver ? ride.driver.fullName : "Missing driver object reference."
-      }`
-    );
+      // Match using the ride's ID
+      const matchingNegotiation = negotiationMap.get(ride._id.toString());
+      rideObj.isNegotiator = !!matchingNegotiation;
 
-    if (ride.negotiations && ride.negotiations.length > 0) {
-      // Step A: HARD PURGE - Identify and eliminate orphaned/deleted negotiations
-      const rawNegotiationIds = ride._doc.negotiations || [];
-      const deadNegotiationIds = [];
-
-      rawNegotiationIds.forEach((id, index) => {
-        // If the populated counterpart is null or missing, it doesn't exist in the database schema anymore
-        if (!ride.negotiations[index]) {
-          deadNegotiationIds.push(id);
-        }
-      });
-
-      if (deadNegotiationIds.length > 0) {
-        console.log(
-          `🧹 [RIDE SCHEMA PURGE] Found ${deadNegotiationIds.length} dead negotiation references. Removing from Ride Offer...`
-        );
-
-        // Wipe them out of the array inside the database permanently
-        await RideOffer.findByIdAndUpdate(req.params.id, {
-          $pull: { negotiations: { $in: deadNegotiationIds } },
-        });
-
-        // Filter out the null values from our local response array instantly
-        ride.negotiations = ride.negotiations.filter((neg) => neg !== null);
+      if (matchingNegotiation) {
+        rideObj.myNegotiation = matchingNegotiation;
       }
 
-      // Step B: DUPLICATE CHANNEL CHECK - Enforce absolute unique conversational pairings
-      const seen = new Set();
-      ride.negotiations = ride.negotiations.filter((neg) => {
-        const key = `${neg.negotiator?._id}-${neg.serviceProvider?._id}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
+      // --- CRITICAL RULE INJECTION ---
+      // Check if ANY negotiation linked to this ride is no longer 'ride pending'
+      const hasActiveOrClosedRide = rideObj.negotiations?.some(
+        (neg) => neg.status && neg.status !== "ride pending"
+      );
 
-      console.log(
-        `🤝 [NEGOTIATIONS CLEANED] ${ride.negotiations.length} active valid negotiation channels remain.`
-      );
-    } else {
-      console.log(
-        "🤝 [NEGOTIATIONS EMPTY] No active rider biddings or chats attached to this manifest yet."
-      );
-    }
+      // Disable further interactions if it has stepped past initialization phase
+      rideObj.isDisabled = !!hasActiveOrClosedRide;
+      // -------------------------------
+
+      return rideObj;
+    });
+
+    // 4. Sort: User's negotiations first, then others by creation date
+    rides.sort((a, b) => {
+      if (b.isNegotiator !== a.isNegotiator) {
+        return b.isNegotiator ? 1 : -1; // true values first
+      }
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
 
     console.log(
-      "✅ [GET RIDE BY ID SUCCESS] Document payload built. Emitting code 200."
+      `[RIDE CONTROLLER] Found and processed ${rides.length} active pipelines (excluding own).`
     );
-    res.status(200).json({ success: true, data: ride });
+    console.log("User ID:", userId);
+    console.log(
+      "Negotiations found for user in rides:",
+      relevantNegotiations.length
+    );
+
+    res.status(200).json({
+      success: true,
+      count: rides.length,
+      data: rides,
+    });
   } catch (error) {
-    console.error("💥 [GET RIDE BY ID CRITICAL ERROR]:", error.message);
-    console.error(error); // Stack trace logging
-    res.status(500).json({ success: false, message: "Internal server error." });
+    console.error("[RIDE CONTROLLER ERROR] Fetch All Failed:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Error retrieving transit pipelines.",
+    });
   }
 };
-
 // GET MY RIDES: Retrieve all manifests created by the logged-in driver
 exports.getMyRides = async (req, res) => {
   try {
@@ -296,3 +274,223 @@ exports.getMyRides = async (req, res) => {
       .json({ success: false, message: "Failed to retrieve your manifests." });
   }
 };
+
+const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+
+
+
+exports.getRideById = async (req, res) => {
+  console.log(
+    `🔍 [GET RIDE OFFER BY ID START] Fetching details for ID: ${req.params.id}`
+  );
+
+  try {
+    if (!isValidId(req.params.id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid ID format" });
+    }
+
+    const serviceType = req.query.serviceType || "offer_a_ride";
+
+    let request;
+    let isRideOfferSchema = true;
+
+    // ==================== DECIDE SCHEMA ====================
+    if (serviceType === "join_a_ride" || serviceType === "deliver_a_parcel") {
+      console.log("🔄 [FETCHING FROM JOINRIDE SCHEMA]");
+      request = await JoinRide.findById(req.params.id)
+        .populate("requestedBy", "fullName phone email isVerified profileImage")
+        .populate({
+          path: "negotiations",
+          populate: [
+            { path: "negotiator", select: "fullName email phone profileImage" },
+            {
+              path: "serviceProvider",
+              select: "fullName email phone profileImage",
+            },
+          ],
+          select: `
+            negotiator serviceProvider service serviceType
+            negotiatorService status isConfirmed isPaid
+            agreedAmount createdAt updatedAt
+          `,
+        });
+
+      isRideOfferSchema = false;
+    } else {
+      console.log("🔄 [FETCHING FROM RIDEOFFER SCHEMA]");
+      request = await RideOffer.findById(req.params.id)
+        .populate("driver", "fullName phone email isVerified profileImage")
+        .populate({
+          path: "negotiations",
+          populate: [
+            { path: "negotiator", select: "fullName email phone profileImage" },
+            {
+              path: "serviceProvider",
+              select: "fullName email phone profileImage",
+            },
+            {
+              path: "service",
+              select:
+                "pickupPoint dropoffPoint departureTime availableSeats estimatedFare status",
+            },
+          ],
+          select: `
+            negotiator serviceProvider service serviceType
+            negotiatorService status isConfirmed isPaid
+            agreedAmount createdAt updatedAt
+          `,
+        });
+    }
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: "Ride instance not found",
+      });
+    }
+
+    // Convert to plain Javascript object to allow runtime manipulation
+    let dataObj = request.toObject();
+
+    // ====================== ENRICH NEGOTIATIONS WITH WHOLE JOINRIDE DOCUMENT ======================
+    if (dataObj.negotiations && dataObj.negotiations.length > 0) {
+      console.log(
+        `🔄 Enriching ${dataObj.negotiations.length} negotiations with full negotiatorServiceData...`
+      );
+
+      for (let neg of dataObj.negotiations) {
+        if (neg.negotiatorService && isValidId(neg.negotiatorService)) {
+          try {
+            // ✅ Fetching the entire JoinRide document without structural omissions 
+            const serviceData = await JoinRide.findById(
+              neg.negotiatorService
+            ).lean();
+
+            if (serviceData) {
+              neg.negotiatorServiceData = serviceData;
+              console.log(
+                `✅ Successfully attached whole JoinRide document to negotiatorServiceData for neg ${neg._id}`
+              );
+            } else {
+              neg.negotiatorServiceData = null;
+              console.log(
+                `⚠️ negotiatorService matching ID ${neg.negotiatorService} was not found`
+              );
+            }
+          } catch (err) {
+            console.error(
+              `❌ Error resolving negotiatorServiceData context matching JoinRide:`,
+              err.message
+            );
+            neg.negotiatorServiceData = null;
+          }
+        } else {
+          neg.negotiatorServiceData = null;
+        }
+      }
+    }
+
+    const currentUserId = req.user?._id?.toString() || req.user?.toString();
+    const ownerId = isRideOfferSchema
+      ? request.driver?._id?.toString() || request.driver?.toString()
+      : request.requestedBy?._id?.toString() || request.requestedBy?.toString();
+
+    const isOwner = currentUserId && ownerId && currentUserId === ownerId;
+
+    // Check if current user has active negotiation paths open
+    let hasNegotiation = false;
+    let userNegotiation = null;
+
+    if (dataObj.negotiations && dataObj.negotiations.length > 0) {
+      userNegotiation = dataObj.negotiations.find((neg) => {
+        const negotiatorId =
+          neg.negotiator?._id?.toString() || neg.negotiator?.toString();
+        return negotiatorId === currentUserId;
+      });
+      hasNegotiation = !!userNegotiation;
+    }
+
+    // Cleanup Dead Collections (Owner only)
+    if (isOwner && dataObj.negotiations?.length > 0) {
+      const rawNegotiationIds = request._doc.negotiations || [];
+      const deadNegotiationIds = [];
+
+      rawNegotiationIds.forEach((id, index) => {
+        if (!request.negotiations?.[index]) {
+          deadNegotiationIds.push(id);
+        }
+      });
+
+      if (deadNegotiationIds.length > 0) {
+        const model = isRideOfferSchema ? RideOffer : JoinRide;
+        await model.findByIdAndUpdate(req.params.id, {
+          $pull: { negotiations: { $in: deadNegotiationIds } },
+        });
+      }
+    }
+
+    // Enforce Channel Privacy Filter
+    let negotiationsToReturn = [];
+    const negotiators = [];
+
+    if (isOwner) {
+      // Step B: DUPLICATE CHANNEL CHECK - Isolating conversational pairings
+      if (dataObj.negotiations && dataObj.negotiations.length > 0) {
+        const seen = new Set();
+        dataObj.negotiations = dataObj.negotiations.filter((neg) => {
+          const key = `${neg.negotiator?._id || neg.negotiator}-${
+            neg.serviceProvider?._id || neg.serviceProvider
+          }`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      }
+      negotiationsToReturn = dataObj.negotiations || [];
+    } else if (hasNegotiation && userNegotiation) {
+      negotiationsToReturn = [userNegotiation];
+    }
+
+    // Build negotiators profile maps for dashboard view
+    if (isOwner && negotiationsToReturn.length > 0) {
+      const negotiatorMap = new Map();
+      negotiationsToReturn.forEach((neg) => {
+        const negotiator = neg.negotiator;
+        if (negotiator?._id) {
+          const idStr = negotiator._id.toString();
+          if (!negotiatorMap.has(idStr)) {
+            negotiatorMap.set(idStr, {
+              _id: negotiator._id,
+              fullName: negotiator.fullName || "User",
+              email: negotiator.email,
+              phone: negotiator.phone || "",
+              profileImage: negotiator.profileImage,
+            });
+          }
+        }
+      });
+      negotiators.push(...negotiatorMap.values());
+    }
+
+    // Final Response Structure
+    res.status(200).json({
+      success: true,
+      data: {
+        ...dataObj,
+        negotiations: negotiationsToReturn,
+        negotiators,
+        isOwner: isOwner,
+        isCustomer: !isOwner,
+        isInTalk: hasNegotiation,
+        isRideOfferSchema: isRideOfferSchema,
+      },
+    });
+  } catch (error) {
+    console.error("💥 [GET RIDE OFFER BY ID ERROR]:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+

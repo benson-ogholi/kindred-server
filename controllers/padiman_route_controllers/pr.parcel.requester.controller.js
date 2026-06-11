@@ -1,5 +1,7 @@
 const mongoose = require("mongoose");
 const ParcelRequest = require("../../models/padiman_route_models/Parcel_Request"); // Use consistent name
+const Negotiation = require("../../models/padiman_route_models/Negotiation");
+const Parcel = require("../../models/padiman_route_models/Parcel");
 
 /**
  * Helper to validate MongoDB ID
@@ -111,11 +113,86 @@ exports.getAllRequests = async (req, res) => {
       .json({ success: false, message: "Server error retrieving requests" });
   }
 };
+
 exports.getAllGlobalRequests = async (req, res) => {
   try {
-    const requests = await ParcelRequest.find({})
+    const userId = req.user; // Get logged-in user from protect middleware
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "User not authenticated",
+      });
+    }
+
+    // 1. Find all negotiations where this user is the negotiator
+    const relevantNegotiations = await Negotiation.find({
+      negotiator: userId,
+    }).select("service status agreedAmount isConfirmed isPaid");
+
+    // Create fast lookup map: parcelId → negotiation
+    const negotiationMap = new Map();
+    relevantNegotiations.forEach((neg) => {
+      if (neg.service) {
+        negotiationMap.set(neg.service.toString(), neg);
+      }
+    });
+
+    // 2. Fetch all ParcelRequests EXCLUDING the ones created by the logged-in user
+    let requests = await ParcelRequest.find({
+      user: { $ne: userId }, // <-- EXCLUDE OWN CREATED REQUESTS HERE
+    })
       .sort({ createdAt: -1 })
-      .populate("user", "fullName phone email isVerified profileImage");
+      .populate("user", "fullName phone email isVerified profileImage")
+      .populate({
+        path: "negotiations",
+        populate: [
+          {
+            path: "negotiator",
+            select: "fullName phone email isVerified profileImage",
+          },
+          {
+            path: "serviceProvider",
+            select: "fullName phone email isVerified profileImage",
+          },
+        ],
+      });
+
+    // 3. Enrich each request
+    requests = requests.map((request) => {
+      const requestObj = request.toObject ? request.toObject() : { ...request };
+
+      const matchingNegotiation = negotiationMap.get(request._id.toString());
+      requestObj.isNegotiator = !!matchingNegotiation;
+
+      if (matchingNegotiation) {
+        requestObj.myNegotiation = matchingNegotiation;
+      }
+
+      // --- CRITICAL RULE INJECTION ---
+      // Check if ANY negotiation linked to this request is no longer 'ride pending'
+      const hasActiveOrClosedRide = requestObj.negotiations?.some(
+        (neg) => neg.status && neg.status !== "ride pending"
+      );
+
+      // Disable further interactions if it has stepped past initialization phase
+      requestObj.isDisabled = !!hasActiveOrClosedRide;
+      // -------------------------------
+
+      return requestObj;
+    });
+
+    // 4. Sort: User's negotiations first, then others
+    requests.sort((a, b) => {
+      if (b.isNegotiator !== a.isNegotiator) {
+        return b.isNegotiator ? 1 : -1; // true first
+      }
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
+
+    console.log("Total requests (excluding own):", requests.length);
+    console.log("User ID:", userId);
+    console.log("Negotiations found for user:", relevantNegotiations.length);
 
     res.status(200).json({
       success: true,
@@ -123,9 +200,74 @@ exports.getAllGlobalRequests = async (req, res) => {
       data: requests,
     });
   } catch (error) {
+    console.error("Error retrieving global requests:", error);
     res.status(500).json({
       success: false,
       message: "Server error retrieving global requests",
+    });
+  }
+};
+
+exports.deleteAllNegotiations = async (req, res) => {
+  console.log(`🗑️ [DELETE ALL NEGOTIATIONS] Started for ID: ${req.params.id}`);
+
+  try {
+    const { id } = req.params; // This is the ParcelRequest or RideOffer ID
+
+    if (!isValidId(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid ID format" });
+    }
+
+    // 1. Find the parent request to know its serviceType and current negotiations
+    const request = await ParcelRequest.findById(id).select(
+      "negotiations serviceType"
+    );
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: "Request not found",
+      });
+    }
+
+    const negotiationIds = request.negotiations || [];
+
+    if (negotiationIds.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No negotiations to delete",
+      });
+    }
+
+    console.log(`🗑️ Found ${negotiationIds.length} negotiations to delete.`);
+
+    // 2. Delete all Negotiation documents
+    await Negotiation.deleteMany({ _id: { $in: negotiationIds } });
+
+    // 3. Clear the negotiations array in the parent document
+    await ParcelRequest.findByIdAndUpdate(id, {
+      $set: { negotiations: [] },
+    });
+
+    // Optional: If you also support RideOffer, add this:
+    // await RideOffer.findByIdAndUpdate(id, { $set: { negotiations: [] } });
+
+    console.log(
+      `✅ Successfully deleted all ${negotiationIds.length} negotiations`
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `All ${negotiationIds.length} negotiations deleted successfully`,
+      deletedCount: negotiationIds.length,
+    });
+  } catch (error) {
+    console.error("💥 [DELETE ALL NEGOTIATIONS ERROR]:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error while deleting negotiations",
     });
   }
 };
@@ -139,133 +281,202 @@ exports.getRequestById = async (req, res) => {
 
   try {
     if (!isValidId(req.params.id)) {
-      console.log(
-        `⚠️ [VALIDATION FAILURE] Provided ID "${req.params.id}" fails structural format checks.`
-      );
       return res
         .status(400)
         .json({ success: false, message: "Invalid ID format" });
     }
 
-    console.log(
-      "📝 [DB QUERY] Running findById and resolving relationship reference paths..."
-    );
-    let request = await ParcelRequest.findById(req.params.id)
-      .populate("user", "fullName phone email isVerified profileImage")
-      .populate({
-        path: "negotiations",
-        populate: [
-          { path: "negotiator", select: "fullName email phone profileImage" },
-          {
-            path: "serviceProvider",
-            select: "fullName email phone profileImage",
-          },
-        ],
-      });
+    const { negotiatorService } = req.query;
+    const serviceType = req.query.serviceType || "deliver_a_parcel";
+
+    let request;
+    let isParcelSchema = false;
+
+    // ==================== DECIDE SCHEMA ====================
+    if (negotiatorService && serviceType === "deliver_a_parcel") {
+      console.log("🔄 [FETCHING FROM PARCEL SCHEMA]");
+      request = await Parcel.findById(req.params.id)
+        .populate("requestedBy", "fullName phone email isVerified profileImage")
+        .populate({
+          path: "negotiations",
+          populate: [
+            { path: "negotiator", select: "fullName email phone profileImage" },
+            {
+              path: "serviceProvider",
+              select: "fullName email phone profileImage",
+            },
+          ],
+          select: `
+            negotiator serviceProvider service serviceType
+            negotiatorService status isConfirmed isPaid
+            agreedAmount createdAt updatedAt
+          `,
+        });
+
+      isParcelSchema = true;
+    } else {
+      console.log("🔄 [FETCHING FROM PARCELREQUEST SCHEMA]");
+      request = await ParcelRequest.findById(req.params.id)
+        .populate("user", "fullName phone email isVerified profileImage")
+        .populate({
+          path: "negotiations",
+          populate: [
+            { path: "negotiator", select: "fullName email phone profileImage" },
+            {
+              path: "serviceProvider",
+              select: "fullName email phone profileImage",
+            },
+            {
+              path: "service",
+              select:
+                "pickupAddress destinationCity dispatchDateStart dispatchDateEnd status priceRange",
+            },
+          ],
+          select: `
+            negotiator serviceProvider service serviceType
+            negotiatorService status isConfirmed isPaid
+            agreedAmount createdAt updatedAt
+          `,
+        });
+    }
 
     if (!request) {
-      console.log(
-        `❌ [NOT FOUND] Request ${req.params.id} could not be matched inside the collection.`
-      );
       return res.status(404).json({
         success: false,
         message: "Request not found",
       });
     }
 
-    // Comprehensive logs capturing structural negotiation fields
-    console.log("📊 [DATA INSIGHT] Document evaluation details:");
-    console.log(
-      `    • Creator Profile: ${
-        request.user ? request.user.fullName : "Anonymous User"
-      }`
-    );
+    // Convert to plain object first
+    let dataObj = request.toObject();
 
-    if (request.negotiations && request.negotiations.length > 0) {
-      // 1. HARD PURGE: Identify and eliminate orphaned/deleted negotiations
-      // Mongoose populates non-existent references as null.
-      // We grab the raw array of ObjectIDs from the unpopulated document state to find the exact broken IDs.
+    // ====================== ENRICH NEGOTIATIONS WITH negotiatorServiceData ======================
+    if (dataObj.negotiations && dataObj.negotiations.length > 0) {
+      console.log(
+        `🔄 Enriching ${dataObj.negotiations.length} negotiations with negotiatorServiceData...`
+      );
+
+      for (let neg of dataObj.negotiations) {
+        if (neg.negotiatorService && isValidId(neg.negotiatorService)) {
+          try {
+            const serviceData = await Parcel.findById(neg.negotiatorService)
+              .select("item parties route schedule notes properties status")
+              .lean();
+
+            console.warn(serviceData, "serviceDataserviceData");
+            if (serviceData) {
+              neg.negotiatorServiceData = serviceData;
+              console.log(
+                `✅ Attached negotiatorServiceData for negotiation ${neg._id}`
+              );
+            } else {
+              neg.negotiatorServiceData = null;
+              console.log(
+                `⚠️ negotiatorService not found: ${neg.negotiatorService}`
+              );
+            }
+          } catch (err) {
+            console.error(
+              `❌ Error fetching negotiatorServiceData:`,
+              err.message
+            );
+            neg.negotiatorServiceData = null;
+          }
+        } else {
+          neg.negotiatorServiceData = null;
+        }
+      }
+    }
+
+    const currentUserId = req.user?._id?.toString() || req.user?.toString();
+    const ownerId = isParcelSchema
+      ? request.requestedBy?._id?.toString() || request.requestedBy?.toString()
+      : request.user?._id?.toString() || request.user?.toString();
+
+    const isOwner = currentUserId && ownerId && currentUserId === ownerId;
+
+    // Check if current user has negotiation
+    let hasNegotiation = false;
+    let userNegotiation = null;
+
+    if (dataObj.negotiations && dataObj.negotiations.length > 0) {
+      userNegotiation = dataObj.negotiations.find((neg) => {
+        const negotiatorId =
+          neg.negotiator?._id?.toString() || neg.negotiator?.toString();
+        return negotiatorId === currentUserId;
+      });
+      hasNegotiation = !!userNegotiation;
+    }
+
+    // Cleanup (Owner only)
+    if (isOwner && dataObj.negotiations?.length > 0) {
       const rawNegotiationIds = request._doc.negotiations || [];
       const deadNegotiationIds = [];
 
       rawNegotiationIds.forEach((id, index) => {
-        // If the populated counterpart is null or missing, it doesn't exist in the Negotiation schema
-        if (!request.negotiations[index]) {
+        if (!request.negotiations?.[index]) {
           deadNegotiationIds.push(id);
         }
       });
 
       if (deadNegotiationIds.length > 0) {
-        console.log(
-          `🧹 [PARCEL SCHEMA PURGE] Found ${deadNegotiationIds.length} dead negotiation references. Removing from Parcel Request...`
-        );
-
-        // Wipe them out of the database array permanently
-        await ParcelRequest.findByIdAndUpdate(req.params.id, {
+        const model = isParcelSchema ? Parcel : ParcelRequest;
+        await model.findByIdAndUpdate(req.params.id, {
           $pull: { negotiations: { $in: deadNegotiationIds } },
         });
-
-        // Filter out the null values from our local runtime array instantly
-        request.negotiations = request.negotiations.filter(
-          (neg) => neg !== null
-        );
       }
+    }
 
-      // 2. SELF-NEGOTIATION CLEANUP: Remove any tracks where users negotiate with themselves
-      // const invalidNegotiationIds = request.negotiations
-      //   .filter((neg) => {
-      //     const negotiatorId = neg.negotiator?._id?.toString();
-      //     const providerId = neg.serviceProvider?._id?.toString();
-      //     return negotiatorId && providerId && negotiatorId === providerId;
-      //   })
-      //   .map((neg) => neg._id);
+    // Filter negotiations for non-owners
+    let negotiationsToReturn = [];
+    const negotiators = [];
 
-      // if (invalidNegotiationIds.length > 0) {
-      //   console.log(
-      //     `🚨 [FORCE DELETE] Found ${invalidNegotiationIds.length} self-negotiation entries. Purging from database...`
-      //   );
+    if (isOwner) {
+      negotiationsToReturn = dataObj.negotiations || [];
+    } else if (hasNegotiation && userNegotiation) {
+      negotiationsToReturn = [userNegotiation];
+    }
 
-      //   // Remove documents completely from the negotiations collection
-      //   await mongoose
-      //     .model("Negotiation")
-      //     .deleteMany({ _id: { $in: invalidNegotiationIds } });
-
-      //   // Pull them out of the parcel request schema array references
-      //   await ParcelRequest.findByIdAndUpdate(req.params.id, {
-      //     $pull: { negotiations: { $in: invalidNegotiationIds } },
-      //   });
-
-      //   // Instantly filter out from local array response
-      //   request.negotiations = request.negotiations.filter(
-      //     (neg) => !invalidNegotiationIds.includes(neg._id)
-      //   );
-      // }
-
-      // 3. DUPLICATE CHANNEL CHECK: Enforce absolute unique conversational pairings
-      const seen = new Set();
-      request.negotiations = request.negotiations.filter((neg) => {
-        const key = `${neg.negotiator?._id}-${neg.serviceProvider?._id}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
+    // Build negotiators list for owner
+    if (isOwner && negotiationsToReturn.length > 0) {
+      const negotiatorMap = new Map();
+      negotiationsToReturn.forEach((neg) => {
+        const negotiator = neg.negotiator;
+        if (negotiator?._id) {
+          const idStr = negotiator._id.toString();
+          if (!negotiatorMap.has(idStr)) {
+            negotiatorMap.set(idStr, {
+              _id: negotiator._id,
+              fullName: negotiator.fullName,
+              email: negotiator.email,
+              phone: negotiator.phone,
+              profileImage: negotiator.profileImage,
+            });
+          }
+        }
       });
-
-      console.log(
-        `🤝 [NEGOTIATIONS CLEANED] ${request.negotiations.length} active valid negotiation channels remain.`
-      );
-    } else {
-      console.log(
-        "🤝 [NEGOTIATIONS EMPTY] No active driver biddings or chats attached to this request yet."
-      );
+      negotiators.push(...negotiatorMap.values());
     }
 
     console.log(
-      "✅ [GET REQUEST BY ID SUCCESS] Document payload built. Emitting code 200."
+      `✅ [SUCCESS] negotiatorServiceData attached to ${negotiationsToReturn.length} negotiations`
     );
-    res.status(200).json({ success: true, data: request });
+
+    // Final Response
+    res.status(200).json({
+      success: true,
+      data: {
+        ...dataObj,
+        negotiations: negotiationsToReturn,
+        negotiators,
+        isOwner: isOwner,
+        isCustomer: !isOwner,
+        isInTalk: hasNegotiation,
+        isParcelSchema: isParcelSchema,
+      },
+    });
   } catch (error) {
-    console.error("💥 [GET REQUEST BY ID CRITICAL ERROR]:", error.message);
-    console.error(error); // Stack trace logging
+    console.error("💥 [GET REQUEST BY ID ERROR]:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };

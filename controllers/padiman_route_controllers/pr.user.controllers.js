@@ -1,9 +1,10 @@
 const Padiman_Route_User = require("../../models/padiman_route_models/Padiman_Route_User");
 const Negotiation = require("../../models/padiman_route_models/Negotiation");
-const Parcel_Request = require("../../models/padiman_route_models/Parcel_Request");
+const ParcelRequest = require("../../models/padiman_route_models/Parcel_Request");
 const RideOffer = require("../../models/padiman_route_models/RideOffer");
 const Parcel = require("../../models/padiman_route_models/Parcel");
 const { uploadToBackblaze } = require("../../utils/uploadToBackblaze");
+const JoinRide = require("../../models/padiman_route_models/JoinRide");
 
 // GET PROFILE
 const getProfile = async (req, res) => {
@@ -90,38 +91,41 @@ const getUserDashboardOrders = async (req, res) => {
   try {
     const userId = req.user;
 
-    // 1. Fetch data from primary listings schemas concurrently
+    // 1. Fetch data from primary listings schemas concurrently with UNRESTRICTED population
     const [
       postedRides,
       requestedParcels,
       deliveryParcels,
       customerNegotiations,
     ] = await Promise.all([
-      // offer_ride: User is offering a seat in their vehicle
+      // offer_ride: Returns full RideOffer + full Driver profile
       RideOffer.find({ driver: userId })
-        .populate("driver", "fullName phone email profileImage")
+        .populate("driver")
         .sort({ createdAt: -1 }),
 
-      // send_parcel: User requested a courier to pick up and send a parcel
-      Parcel_Request.find({ user: userId })
-        .populate("user", "fullName phone email profileImage")
-        .sort({ createdAt: -1 }),
-
-      // deliver_parcel: Active fulfillment / transit state pipelines
+      // send_parcel: If "Parcel" represents packages a user created to be sent:
+      // This fetches ALL details of the parcel and the complete user object
       Parcel.find({ requestedBy: userId })
-        .populate("requestedBy", "fullName phone email profileImage")
+        .populate("requestedBy")
         .sort({ createdAt: -1 }),
 
-      // join_ride: Tracked via child negotiations matching the 'offer_a_ride' paradigm
+      // deliver_parcel: If you have a separate schema/flag for parcels the user is *delivering*
+      // (Leaving your original query fallback intact here just in case)
+      ParcelRequest.find({ user: userId })
+        .populate("user")
+        .sort({ createdAt: -1 }),
+
+      // join_ride: Returns full Negotiation + full Service Provider profile
       Negotiation.find({ negotiator: userId })
-        .populate("serviceProvider", "fullName phone email profileImage")
+        .populate("serviceProvider")
+        .populate("negotiator")
         .sort({ createdAt: -1 }),
     ]);
 
     // 2. Map and Categorize Arrays into the 4 target lanes
     const offer_ride = postedRides;
-    const send_parcel = requestedParcels;
-    const deliver_parcel = deliveryParcels;
+    const send_parcel = requestedParcels; // This now contains full Parcel details + full User profile
+    const deliver_parcel = deliveryParalel;
 
     // Filter negotiations explicitly to isolate passengers joining a ride
     const join_ride = customerNegotiations.filter(
@@ -179,7 +183,7 @@ const getUserDashboardOrders = async (req, res) => {
       orders: {
         offer_ride,
         deliver_parcel,
-        send_parcel,
+        send_parcel, // Sends back the entire array of full details
         join_ride,
       },
     });
@@ -191,58 +195,290 @@ const getUserDashboardOrders = async (req, res) => {
     });
   }
 };
-
 // ====================== PROFILE PICTURE UPLOAD ONLY ======================
 const updateProfilePicture = async (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({
-          success: false,
-          message: "No image file uploaded",
-        });
-      }
-  
-      const user = await Padiman_Route_User.findById(req.user);
-      if (!user) {
-        return res.status(404).json({ success: false, message: "User not found" });
-      }
-  
-      console.log(`📸 Uploading new profile picture for user: ${user._id}`);
-  
-      // Upload to Backblaze B2
-      const imageUrl = await uploadToBackblaze(
-        req.file.buffer,
-        req.file.originalname,
-        "profile-images"   // Folder in Backblaze
-      );
-  
-      // Update user profile image
-      user.profileImage = imageUrl;
-      await user.save();
-  
-      console.log("✅ Profile picture updated successfully:", imageUrl);
-  
-      res.status(200).json({
-        success: true,
-        message: "Profile picture updated successfully",
-        profileImage: imageUrl,
-        user: {
-          _id: user._id,
-          fullName: user.fullName,
-          profileImage: user.profileImage,
-        },
-      });
-    } catch (error) {
-      console.error("❌ Update Profile Picture Error:", error.message);
-      res.status(500).json({
+  try {
+    if (!req.file) {
+      return res.status(400).json({
         success: false,
-        message: "Failed to upload profile picture",
-        error: error.message,
+        message: "No image file uploaded",
       });
     }
+
+    const user = await Padiman_Route_User.findById(req.user);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    console.log(`📸 Uploading new profile picture for user: ${user._id}`);
+
+    // Upload to Backblaze B2
+    const imageUrl = await uploadToBackblaze(
+      req.file.buffer,
+      req.file.originalname,
+      "profile-images" // Folder in Backblaze
+    );
+
+    // Update user profile image
+    user.profileImage = imageUrl;
+    await user.save();
+
+    console.log("✅ Profile picture updated successfully:", imageUrl);
+
+    res.status(200).json({
+      success: true,
+      message: "Profile picture updated successfully",
+      profileImage: imageUrl,
+      user: {
+        _id: user._id,
+        fullName: user.fullName,
+        profileImage: user.profileImage,
+      },
+    });
+  } catch (error) {
+    console.error("❌ Update Profile Picture Error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Failed to upload profile picture",
+      error: error.message,
+    });
+  }
+};
+
+const getUserAllRequests = async (req, res) => {
+  try {
+    const userId = req.user; // From auth middleware
+
+    const [parcels, joinRides, parcelRequests, rideOffers] = await Promise.all([
+      Parcel.find({ requestedBy: userId }).sort({ createdAt: -1 }),
+      JoinRide.find({ requestedBy: userId }).sort({ createdAt: -1 }),
+      ParcelRequest.find({ user: userId }).sort({ createdAt: -1 }),
+      RideOffer.find({ driver: userId }).sort({ createdAt: -1 }),
+    ]);
+
+    // Format dates for all requests
+    const formattedParcels = parcels.map(formatRequestDates);
+    const formattedJoinRides = joinRides.map(formatRequestDates);
+    const formattedParcelRequests = parcelRequests.map(formatRequestDates);
+    const formattedRideOffers = rideOffers.map(formatRequestDates);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        parcels: formattedParcels,
+        joinRides: formattedJoinRides,
+        parcelRequests: formattedParcelRequests,
+        rideOffers: formattedRideOffers,
+        total:
+          formattedParcels.length +
+          formattedJoinRides.length +
+          formattedParcelRequests.length +
+          formattedRideOffers.length,
+      },
+    });
+  } catch (error) {
+    console.error("Get user all requests error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch user requests",
+    });
+  }
+};
+
+const getRequestById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { type } = req.query;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "Request ID is required",
+      });
+    }
+
+    if (!type) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a 'type' query parameter",
+      });
+    }
+
+    let requestData = null;
+    let modelName = "";
+
+    const lowerType = type.toLowerCase();
+
+    switch (lowerType) {
+      case "parcel":
+        requestData = await Parcel.findById(id).populate(
+          "requestedBy",
+          "fullName email phone"
+        );
+        modelName = "Parcel";
+        break;
+
+      case "joinride":
+        requestData = await JoinRide.findById(id).populate(
+          "requestedBy",
+          "fullName email phone"
+        );
+        modelName = "JoinRide";
+        break;
+
+      case "parcelrequest":
+        requestData = await ParcelRequest.findById(id)
+          .populate("user", "fullName email phone")
+          .populate("negotiations");
+        modelName = "ParcelRequest";
+        break;
+
+      case "rideoffer":
+        requestData = await RideOffer.findById(id)
+          .populate("driver", "fullName email phone")
+          .populate("negotiations");
+        modelName = "RideOffer";
+        break;
+
+      default:
+        return res.status(400).json({
+          success: false,
+          message:
+            "Invalid type. Use: parcel, joinride, parcelrequest, or rideoffer",
+        });
+    }
+
+    if (!requestData) {
+      return res.status(404).json({
+        success: false,
+        message: `${modelName} not found`,
+      });
+    }
+
+    // Format dates before sending response
+    const formattedData = formatRequestDates(requestData);
+
+    res.status(200).json({
+      success: true,
+      data: formattedData,
+    });
+  } catch (error) {
+    console.error("Get request by ID error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching request",
+    });
+  }
+};
+
+// ====================== DATE FORMATTER ======================
+// ====================== DATE FORMATTER (Fixed) ======================
+// ====================== DATE FORMATTER (DEBUG + FIXED) ======================
+const formatRequestDates = (obj) => {
+  if (!obj) return obj;
+
+  const data = obj.toObject ? obj.toObject() : { ...obj };
+
+  const formatDate = (dateInput, fieldName = "") => {
+    if (!dateInput) return null;
+
+    console.log(`[DATE DEBUG] Field: ${fieldName} | Raw Input:`, dateInput, `| Type: ${typeof dateInput}`);
+
+    let d;
+
+    if (dateInput instanceof Date) {
+      d = dateInput;
+    } else if (typeof dateInput === "string") {
+      d = new Date(dateInput);
+
+      // Fallback attempts
+      if (isNaN(d.getTime())) {
+        console.log(`[DATE DEBUG] First parse failed for: ${dateInput} → Trying fallback...`);
+        
+        let cleaned = dateInput.trim();
+        
+        // Common fixes
+        cleaned = cleaned.replace(" ", "T");           // "2025-03-24 02:35" → "2025-03-24T02:35"
+        cleaned = cleaned.replace(/\.000Z?$/, "");     // Remove .000Z sometimes
+        cleaned = cleaned.split("+")[0];               // Remove timezone offset
+
+        d = new Date(cleaned);
+      }
+    } else if (typeof dateInput === "number") {
+      d = new Date(dateInput); // timestamp
+    } else {
+      d = new Date(dateInput);
+    }
+
+    if (isNaN(d.getTime())) {
+      console.error(`[DATE ERROR] Invalid date for field "${fieldName}":`, dateInput);
+      return dateInput; // Return original so frontend doesn't break
+    }
+
+    // Successful formatting
+    const dayName = d.toLocaleDateString("en-US", { weekday: "long" });
+    const monthName = d.toLocaleDateString("en-US", { month: "long" });
+    const year = d.getFullYear();
+
+    let hours = d.getHours();
+    const minutes = d.getMinutes().toString().padStart(2, "0");
+    const ampm = hours >= 12 ? "pm" : "am";
+    hours = hours % 12 || 12;
+
+    const day = d.getDate();
+    const ordinal = (n) => {
+      if (n > 3 && n < 21) return "th";
+      switch (n % 10) {
+        case 1: return "st";
+        case 2: return "nd";
+        case 3: return "rd";
+        default: return "th";
+      }
+    };
+
+    const formatted = `${dayName} ${hours}:${minutes}${ampm} ${day}${ordinal(day)} ${monthName} ${year}`;
+    console.log(`[DATE SUCCESS] ${fieldName} → ${formatted}`);
+    
+    return formatted;
   };
 
+  // Format top-level fields
+  const dateFields = [
+    "createdAt", "updatedAt", "departureTime", "dispatchDateStart",
+    "dispatchDateEnd", "pickupTime", "deliveryTime", "date",
+    "rideDate", "startDate", "endDate", "availableFrom", "availableUntil"
+  ];
 
+  dateFields.forEach((field) => {
+    if (data[field]) {
+      data[field] = formatDate(data[field], field);
+    }
+  });
+
+  // Negotiations
+  if (data.negotiations && Array.isArray(data.negotiations)) {
+    data.negotiations = data.negotiations.map((neg, index) => {
+      console.log(`[DATE DEBUG] Processing negotiation #${index}`);
+      if (neg.createdAt) neg.createdAt = formatDate(neg.createdAt, `negotiations[${index}].createdAt`);
+      if (neg.updatedAt) neg.updatedAt = formatDate(neg.updatedAt, `negotiations[${index}].updatedAt`);
+      if (neg.date) neg.date = formatDate(neg.date, `negotiations[${index}].date`);
+      return neg;
+    });
+  }
+
+  // Nested route object
+  if (data.route && typeof data.route === "object") {
+    Object.keys(data.route).forEach((key) => {
+      if (/date|time/i.test(key) && data.route[key]) {
+        data.route[key] = formatDate(data.route[key], `route.${key}`);
+      }
+    });
+  }
+
+  return data;
+};
 
 module.exports = {
   getProfile,
@@ -252,4 +488,6 @@ module.exports = {
   saveExpoPushToken,
   updateProfilePicture,
   getUserDashboardOrders, // Exported to your route tree configuration files
+  getUserAllRequests,
+  getRequestById,
 };

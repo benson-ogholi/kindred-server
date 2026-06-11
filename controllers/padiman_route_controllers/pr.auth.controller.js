@@ -17,6 +17,7 @@ exports.registerUser = async (req, res) => {
   try {
     const { fullName, phone, email, password, referralCode } = req.body;
 
+    // Create the user
     const newUser = await Padiman_Route_User.create({
       fullName,
       phone,
@@ -25,8 +26,12 @@ exports.registerUser = async (req, res) => {
       referralCode,
     });
 
+    // Generate numeric OTP string
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    otpStore.set(email, { otp, expires: Date.now() + 600000 });
+
+    // Clear old OTPs for this email and save the new one to the DB
+    await PR_Otp.deleteMany({ email });
+    await PR_Otp.create({ email, otp });
 
     console.log(
       `[AUTH] Registration successful for: ${email}. Triggering Welcome Email...`
@@ -114,22 +119,39 @@ exports.loginUser = async (req, res) => {
 exports.sendOtp = async (req, res) => {
   try {
     const { email } = req.body;
+
+    // 1. Validate that the email exists in the request body
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      console.warn(`[AUTH] Send OTP rejected: Invalid or missing email address.`);
+      return res.status(400).json({ 
+        success: false, 
+        message: "Please provide a valid email address." 
+      });
+    }
+
+    // 2. Generate numeric OTP string
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
+    // 3. Clear any existing OTPs for this email and create the new one
     await PR_Otp.deleteMany({ email });
     await PR_Otp.create({ email, otp });
 
+    console.log(`[AUTH] OTP generated for ${email}. Sending email...`);
+
+    // 4. Send the verification email
     await sendPrEmail(
       email,
       "Verification Code",
       `Your verification code is ${otp}`
     );
-    return res.status(200).json({ success: true, message: "OTP sent" });
+
+    return res.status(200).json({ success: true, message: "OTP sent successfully." });
+
   } catch (error) {
-    console.error(`[ERROR] Send OTP: ${error.message}`);
+    console.error(`[ERROR] Send OTP failure: ${error.message}`);
     return res
       .status(500)
-      .json({ success: false, message: "Error sending email" });
+      .json({ success: false, message: "An error occurred while processing your request." });
   }
 };
 
@@ -165,10 +187,13 @@ exports.verifyOtp = async (req, res) => {
     // 3. Delete the OTP document after successful verification
     await PR_Otp.deleteOne({ _id: otpDoc._id });
 
+    const token = generateToken(updatedUser._id);
+
     console.log(`[AUTH] Email verified and status updated for: ${email}`);
 
     res.status(200).json({
       success: true,
+      token,
       message: "OTP verified successfully",
       user: { email: updatedUser.email, isVerified: updatedUser.isVerified },
     });

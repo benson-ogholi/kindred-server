@@ -58,14 +58,14 @@ exports.initializePayment = async (req, res) => {
     );
 
     if (response.data.status) {
-      const newPayment = await Payment.create({
-        negotiationId,
-        userId,
-        amount: agreedAmount,
-        reference,
-        serviceType,
-        status: "pending",
-      });
+      // const newPayment = await Payment.create({
+      //   negotiationId,
+      //   userId,
+      //   amount: agreedAmount,
+      //   reference,
+      //   serviceType,
+      //   status: "pending",
+      // });
 
       console.log("✅ [DB_RECORD_SAVED] Payment pending tracking logged.");
 
@@ -122,8 +122,7 @@ exports.verifyPayment = async (req, res) => {
     );
 
     const paystackData = response.data?.data;
-    const { negotiationId, userId: metadataUserId } =
-      paystackData.metadata || {};
+    const { negotiationId } = paystackData.metadata || {};
 
     if (paystackData.status === "success") {
       // Update Payment Record
@@ -140,15 +139,14 @@ exports.verifyPayment = async (req, res) => {
         { new: true }
       );
 
-      // Determine who should receive the payout credit (e.g., the negotiator or specified target metadata user)
-      const targetUserId = metadataUserId || updatedNegotiation?.negotiator;
+      // TARGET RE-ROUTED: Credit the serviceProvider, not the negotiator/customer
+      const targetUserId = updatedNegotiation?.serviceProvider;
       const amountCredited = paystackData.amount / 100; // Paystack converts Naira to Kobo values
 
       // Extract details cleanly for reuse across Wallet save and Push notification hooks
       const customerInfo = paystackData.customer || {};
       const payerEmailStr = customerInfo.email || "unknown@paystack.com";
 
-      // Paystack safely fallback calculation strategy
       let payerNameStr = "External Payer";
       if (customerInfo.first_name || customerInfo.last_name) {
         payerNameStr = `${customerInfo.first_name || ""} ${
@@ -157,8 +155,6 @@ exports.verifyPayment = async (req, res) => {
       } else if (customerInfo.fullName) {
         payerNameStr = customerInfo.fullName;
       } else if (customerInfo.email) {
-        // --- DB FALLBACK INTEGRATION ENGINE ---
-        // Query database via lowercased email string index to resolve registration metadata
         const dbUser = await Padiman_Route_User.findOne({
           email: customerInfo.email.toLowerCase(),
         });
@@ -177,10 +173,10 @@ exports.verifyPayment = async (req, res) => {
 
       if (targetUserId) {
         console.log(
-          `📡 Process Wallet sync for Target User ID: ${targetUserId}`
+          `📡 Process Wallet sync for Service Provider User ID: ${targetUserId}`
         );
 
-        // 1. Fetch or initialize the destination wallet structure dynamically
+        // Fetch or initialize the destination wallet structure dynamically
         let wallet = await Wallet.findOne({ user: targetUserId });
         if (!wallet) {
           console.log(
@@ -194,17 +190,17 @@ exports.verifyPayment = async (req, res) => {
           });
         }
 
-        // 2. Idempotency Check: Guard against duplicate calls crediting accounts twice
+        // Idempotency Check: Guard against duplicate calls crediting accounts twice
         const alreadyCredited = wallet.earnings.some(
           (earning) => earning.reference === reference
         );
 
         if (!alreadyCredited) {
           console.log(
-            `💰 Crediting ₦${amountCredited} to user balance account...`
+            `💰 Crediting ₦${amountCredited} as PENDING earning to service provider...`
           );
 
-          wallet.balance += amountCredited;
+          // NOTE: wallet.balance += amountCredited; is skipped here because earnings are pending escrow!
           wallet.earnings.push({
             payment: updatedPayment?._id || null,
             negotiationId: negotiationId || null,
@@ -214,12 +210,13 @@ exports.verifyPayment = async (req, res) => {
             amount: amountCredited,
             reference: reference,
             source: resolvedServiceType,
+            status: "pending", // Logged explicitly as pending status
             createdAt: new Date(timeOfPayment),
           });
 
           await wallet.save();
           console.log(
-            `✅ Wallet transaction logged successfully. New running total: ₦${wallet.balance}`
+            `✅ Wallet pending transaction logged successfully. Available Balance remains: ₦${wallet.balance}`
           );
         } else {
           console.log(
@@ -228,15 +225,14 @@ exports.verifyPayment = async (req, res) => {
         }
       } else {
         console.log(
-          "❌ Target destination driver/user context could not be parsed. Wallet update skipped."
+          "❌ Target serviceProvider context could not be parsed. Wallet update skipped."
         );
       }
 
       // ====================== SEND SUCCESS NOTIFICATION ======================
-      // Enriched with complete payer info, timestamps, and explicit service scopes
       await sendNotification(targetUserId, {
         title: "Payment Successful! 🎉",
-        body: `Your payment of ₦${amountCredited} from ${payerNameStr} has been confirmed.`,
+        body: `Your payment of ₦${amountCredited} from ${payerNameStr} has been confirmed. It is currently held as pending.`,
         type: "PAYMENT",
         router: "/(screens)/success",
         data: {
@@ -248,17 +244,17 @@ exports.verifyPayment = async (req, res) => {
           payerEmail: payerEmailStr,
           timeOfPayment: timeOfPayment,
           amount: amountCredited,
-          status: "success",
+          status: "pending",
         },
       });
       // =====================================================================
 
       console.log(
-        "✅ Payment verified, earnings saved to wallet, and notifications sent."
+        "✅ Payment verified, pending earnings saved to wallet, and notifications sent."
       );
       return res.status(200).json({
         success: true,
-        message: "Payment captured successfully and wallet credited.",
+        message: "Payment captured successfully and wallet logged as pending.",
         data: paystackData,
       });
     } else {
@@ -294,7 +290,6 @@ exports.verifyPayment = async (req, res) => {
       error.response?.data || error.message
     );
 
-    // Send error notification
     const userIdFromReq = req.body?.userId || req.user?._id;
     if (userIdFromReq) {
       await sendNotification(userIdFromReq, {
@@ -306,6 +301,232 @@ exports.verifyPayment = async (req, res) => {
       });
     }
 
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+exports.releaseEscrowEarnings = async (req, res) => {
+  console.log("==================================================");
+  console.log(
+    `🚀 [RELEASE_ESCROW_EARNINGS] Triggered for Negotiation ID: ${req.params.negotiationId}`
+  );
+  console.log(`📥 [INCOMING_PARAMS]:`, JSON.stringify(req.params, null, 2));
+  console.log(`📥 [INCOMING_BODY]:`, JSON.stringify(req.body, null, 2));
+  console.log(
+    `📥 [AUTHENTICATED_USER_CONTEXT]:`,
+    req.user
+      ? JSON.stringify(req.user, null, 2)
+      : "No authenticated user injected on request"
+  );
+
+  try {
+    const { negotiationId } = req.params;
+
+    if (!negotiationId) {
+      console.warn(
+        "❌ [VALIDATION_FAILURE]: negotiationId parameter is completely missing from incoming request path."
+      );
+      return res.status(400).json({
+        success: false,
+        message: "Negotiation reference identifier parameter missing.",
+      });
+    }
+
+    console.log(
+      `🔍 [DB_QUERY]: Attempting to locate Wallet document holding negotiationId: ${negotiationId} in earnings array...`
+    );
+    // Locate the specific wallet containing this pending item matching the negotiation record
+    const wallet = await Wallet.findOne({
+      "earnings.negotiationId": negotiationId,
+    });
+
+    if (!wallet) {
+      console.warn(
+        `❌ [NOT_FOUND_FAILURE]: No wallet document matches the negotiation reference: ${negotiationId}`
+      );
+      return res.status(404).json({
+        success: false,
+        message:
+          "No wallet ledger record contains an earnings line matching this negotiation identifier.",
+      });
+    }
+
+    console.log(
+      `📋 [WALLET_MATCHED]: Wallet ID found: ${wallet._id} for User Reference: ${wallet.user}`
+    );
+    console.log(
+      `📊 [CURRENT_WALLET_STATE]: Balance: ₦${wallet.balance} | WithdrawableBalance: ₦${wallet.withdrawableBalance}`
+    );
+
+    // Find the specific structural nested earnings sub-document index
+    const earningIndex = wallet.earnings.findIndex(
+      (earning) =>
+        earning.negotiationId &&
+        earning.negotiationId.toString() === negotiationId
+    );
+
+    console.log(
+      `🎯 [ARRAY_INDEX_MATCHED]: Nested index for target target earning within array is: ${earningIndex}`
+    );
+
+    if (earningIndex === -1) {
+      console.error(
+        `❌ [LOGICAL_CRITICAL_ERROR]: The top-level query matched this wallet, but sub-document findIndex could not pinpoint negotiationId: ${negotiationId} in array.`
+      );
+      return res.status(500).json({
+        success: false,
+        message:
+          "Internal tracking mismatch relative to target earnings structural alignment.",
+      });
+    }
+
+    const targetEarning = wallet.earnings[earningIndex];
+    console.log(
+      `📦 [TARGET_EARNING_DATA]:`,
+      JSON.stringify(targetEarning, null, 2)
+    );
+
+    // Idempotency check: Guard if the status is already updated or not pending
+    // if (targetEarning.status === "success") {
+    //   console.log(
+    //     `⚠️ [IDEMPOTENCY_BLOCK]: Escrow transaction was already executed successfully in a previous loop. Exiting safely.`
+    //   );
+    //   return res.status(200).json({
+    //     success: true,
+    //     message:
+    //       "Escrow clearing redundant. This transaction item is already released and cleared.",
+    //     balance: wallet.balance,
+    //     withdrawableBalance: wallet.withdrawableBalance || wallet.balance,
+    //   });
+    // }
+
+    if (targetEarning.status === "failed") {
+      console.warn(
+        `❌ [STATE_MUTATION_GUARD]: Target ledger line status is flagged as 'failed'. Escrow release aborted.`
+      );
+      return res.status(400).json({
+        success: false,
+        message:
+          "Cannot release funds. This transaction was previously flagged as a failed process.",
+      });
+    }
+
+    console.log(
+      `🔄 [MUTATION_START]: Upgrading state status from '${targetEarning.status}' to 'success'`
+    );
+    // Execute safe operations: transition status and credit balances
+    targetEarning.status = "success";
+
+    console.log(
+      `💸 [MATH_OP]: Adding ₦${targetEarning.amount} to primary balance ledger...`
+    );
+    // Credit standard tracking balance
+    wallet.balance += targetEarning.amount;
+
+    // Credit operational withdrawable balance tracking matrix safely
+    if (typeof wallet.withdrawableBalance !== "number") {
+      console.log(
+        `🔧 [TYPE_FIX]: wallet.withdrawableBalance was not a valid number primitive type. Standardizing to 0.`
+      );
+      wallet.withdrawableBalance = 0;
+    }
+
+    console.log(
+      `💸 [MATH_OP]: Adding ₦${targetEarning.amount} to withdrawable safe balance ledger...`
+    );
+    wallet.withdrawableBalance += targetEarning.amount;
+
+    console.log(
+      `💾 [DB_SAVE]: Writing modified balance updates to Mongo storage engine...`
+    );
+    // Persist wallet balance updates down into MongoDB
+    await wallet.save();
+    console.log(
+      `✅ [ESCROW_RELEASED] ₦${targetEarning.amount} credited to user: ${wallet.user}. New Spendable: ₦${wallet.balance} | Withdrawable: ₦${wallet.withdrawableBalance}`
+    );
+
+    // ====================================================================
+    // INTEGRATED: Toggle negotiation confirmation status state parameters
+    // ====================================================================
+    let updatedNegotiation = null;
+    try {
+      console.log(
+        `🔄 [DB_UPDATE]: Triggering negotiation collection update for document target ID: ${negotiationId}...`
+      );
+      updatedNegotiation = await Negotiation.findByIdAndUpdate(
+        negotiationId,
+        { $set: { isConfirmed: true } },
+        { new: true }
+      );
+      console.log(
+        `🔒 [NEGOTIATION_CONFIRMED] isConfirmed status verified set to true for ID: ${negotiationId}`
+      );
+      console.log(
+        `📄 [UPDATED_NEGOTIATION_PAYLOAD]:`,
+        JSON.stringify(updatedNegotiation, null, 2)
+      );
+    } catch (negErr) {
+      console.error(
+        `⚠️ Failed to update negotiation isConfirmed flag parameters downstream:`,
+        negErr.message,
+        "\nStack trace:",
+        negErr.stack
+      );
+    }
+    // ====================================================================
+
+    // Optionally dispatch background alerts to the Service Provider notifying them of unlocked funds
+    try {
+      console.log(
+        `📱 [NOTIFICATION_DISPATCH]: Compiling background socket payload push alert targeting recipient User ID: ${wallet.user.toString()}...`
+      );
+      await sendNotification(wallet.user.toString(), {
+        title: "Funds Cleared! 💰",
+        body: `₦${targetEarning.amount.toLocaleString()} has been moved from escrow to your spendable available balance.`,
+        type: "PAYMENT",
+        router: "/(screens)/withdrawal",
+        data: {
+          negotiationId,
+          amount: targetEarning.amount,
+          status: "success",
+        },
+      });
+      console.log(
+        `🚀 [NOTIFICATION_SUCCESS]: Notification packet dispatched completely to notification servers.`
+      );
+    } catch (notifErr) {
+      console.error(
+        "⚠️ Push notification failed to send post escrow clear:",
+        notifErr.message,
+        "\nStack trace:",
+        notifErr.stack
+      );
+    }
+
+    console.log(
+      `🏁 [RESPONSE_200]: Escrow release thread execution process finalized successfully.`
+    );
+    console.log("==================================================");
+
+    return res.status(200).json({
+      success: true,
+      message:
+        "Escrow funds released successfully and added directly into the live available balance ledger.",
+      data: {
+        negotiationId,
+        amountReleased: targetEarning.amount,
+        newSpendableBalance: wallet.balance,
+        newWithdrawableBalance: wallet.withdrawableBalance,
+        negotiation: updatedNegotiation,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "❌ [RELEASE_ESCROW_ERROR] Fatal processing exception encountered inside route controller logic:",
+      error.message
+    );
+    console.error("💥 [FULL_ERROR_STACK]:", error.stack);
+    console.log("==================================================");
     return res.status(500).json({ success: false, error: error.message });
   }
 };

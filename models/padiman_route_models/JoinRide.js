@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 
-const parcelSchema = new mongoose.Schema(
+const joinRideSchema = new mongoose.Schema(
   {
     requestedBy: {
       type: mongoose.Schema.Types.ObjectId,
@@ -11,24 +11,7 @@ const parcelSchema = new mongoose.Schema(
       pickupAddress: String,
       deliveryAddress: String,
     },
-    parties: {
-      sender: {
-        fullName: String,
-        contact: String,
-      },
-      recipient: {
-        fullName: String,
-        contact: String,
-      },
-    },
-    item: {
-      name: String,
-      properties: {
-        isFragile: Boolean,
-        isPerishable: Boolean,
-        isInsured: Boolean,
-      },
-    },
+
     schedule: {
       type: { type: String }, // This stores 'immediate', 'scheduled', etc.
       date: Date, // This correctly casts the string ISO date to a Date object
@@ -39,5 +22,4 @@ const parcelSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-
-module.exports = mongoose.model("Parcel", parcelSchema);
+module.exports = mongoose.model("JoinRide", joinRideSchema);

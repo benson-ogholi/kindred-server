@@ -8,70 +8,51 @@ exports.createNegotiation = async (req, res) => {
   console.log("🚀 [NEGOTIATION START] createNegotiation controller invoked");
 
   try {
-    // 1. Get negotiator ID directly from the secure token (req.user)
-    const negotiatorId = req.user;
-    console.log("🔑 [AUTH CHECK] Negotiator ID from token:", negotiatorId);
+    const negotiatorId = req.user; // Ensure we get the ID correctly
+    console.log("🔑 [AUTH] Negotiator ID:", negotiatorId);
 
-    // 2. Destructure the rest from the body
     const { serviceProvider, service, negotiatorService, serviceType } =
       req.body;
-    console.log("📦 [PAYLOAD RECEIVED] Body data:", {
-      serviceProvider,
-      service,
-      negotiatorService,
-      serviceType,
-    });
 
-    // 🔍 Deduplication Check: Look for existing negotiations...
+    if (!serviceProvider || !service || !serviceType) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing required fields" });
+    }
+
+    // === STRICT DEDUPLICATION: Only same negotiator + same service + same provider ===
     console.log(
-      "🕵️ [DUPLICATE CHECK] Searching for existing matching negotiation tracks..."
+      "🕵️ [DUPLICATE CHECK] Checking for existing negotiation by this user..."
     );
-    const existingNegotiations = await Negotiation.find({
+
+    const existing = await Negotiation.findOne({
       service: service,
       negotiator: negotiatorId,
       serviceProvider: serviceProvider,
-    }).sort({ createdAt: 1 });
+    });
 
-    if (existingNegotiations.length > 0) {
+    if (existing) {
       console.log(
-        `⚠️ [DUPLICATE DETECTED] Found ${existingNegotiations.length} pre-existing records for this channel.`
+        `⚠️ [DUPLICATE FOUND] User already has a negotiation channel. Returning existing.`
       );
 
-      const primaryNegotiation = existingNegotiations[0];
-
-      // Purge redundant records (your existing logic)
-      if (existingNegotiations.length > 1) {
-        const redundantIds = existingNegotiations
-          .slice(1)
-          .map((neg) => neg._id);
-
-        await Negotiation.deleteMany({ _id: { $in: redundantIds } });
-
-        if (serviceType === "offer_a_ride") {
-          await RideOffer.findByIdAndUpdate(service, {
-            $pull: { negotiations: { $in: redundantIds } },
-          });
-        } else if (serviceType === "deliver_a_parcel") {
-          await Parcel_Request.findByIdAndUpdate(service, {
-            $pull: { negotiations: { $in: redundantIds } },
-          });
-        }
-      }
-
-      const populatedOriginal = await primaryNegotiation.populate([
-        { path: "negotiator", select: "name email profileImage" },
-        { path: "serviceProvider", select: "name email profileImage" },
+      const populated = await existing.populate([
+        { path: "negotiator", select: "fullName email phone profileImage" },
+        {
+          path: "serviceProvider",
+          select: "fullName email phone profileImage",
+        },
         { path: "service" },
       ]);
 
-      console.log("🎉 [NEGOTIATION RECOVERY] Returning existing record.");
-      return res.status(200).json(populatedOriginal);
+      return res.status(200).json({ success: true, data: populated });
     }
 
-    // 3. Create a brand new negotiation record
+    // === CREATE NEW NEGOTIATION (Different user = allowed) ===
     console.log(
-      "📝 [DB OPERATIONS] No track found. Creating brand new Negotiation document..."
+      "📝 [CREATE] No existing channel → Creating new negotiation..."
     );
+
     const newNegotiation = await Negotiation.create({
       negotiator: negotiatorId,
       serviceProvider,
@@ -79,53 +60,37 @@ exports.createNegotiation = async (req, res) => {
       negotiatorService,
       serviceType,
     });
-    console.log(
-      "✅ [DB SUCCESS] Negotiation document created. ID:",
-      newNegotiation._id
-    );
 
-    // 4. Update the relevant model's tracking array
-    console.log(`🔀 [ROUTING UPDATE] Evaluating serviceType: "${serviceType}"`);
+    console.log("✅ [CREATED] Negotiation ID:", newNegotiation._id);
 
+    // Add to the parent service's negotiations array
     if (serviceType === "offer_a_ride") {
-      const updatedRide = await RideOffer.findByIdAndUpdate(
+      await RideOffer.findByIdAndUpdate(
         service,
         { $addToSet: { negotiations: newNegotiation._id } },
         { new: true }
       );
-      if (updatedRide) {
-        console.log("🔹 [RIDE MATCH SUCCESS] RideOffer updated.");
-      }
     } else if (serviceType === "deliver_a_parcel") {
-      const updatedParcel = await Parcel_Request.findByIdAndUpdate(
+      await Parcel_Request.findByIdAndUpdate(
+        // Note: Use your actual model name
         service,
         { $addToSet: { negotiations: newNegotiation._id } },
         { new: true }
       );
-      if (updatedParcel) {
-        console.log("🔹 [PARCEL MATCH SUCCESS] Parcel_Request updated.");
-      }
     }
 
-    // 5. Populate for response
-    console.log("🔄 [POPULATE RELATIONSHIPS] Populating reference trees...");
+    // Populate full data for response
     const populatedNegotiation = await newNegotiation.populate([
-      { path: "negotiator", select: "name email profileImage" },
-      { path: "serviceProvider", select: "name email profileImage" },
+      { path: "negotiator", select: "fullName email phone profileImage" },
+      { path: "serviceProvider", select: "fullName email phone profileImage" },
       { path: "service" },
     ]);
 
-    // ====================== NOTIFY SERVICE PROVIDER ======================
-    console.log(
-      `🛎️ [NOTIFICATION] Sending Push + Email to Service Provider: ${serviceProvider}`
-    );
-
+    // Send notification to service provider
     await sendNotification(serviceProvider, {
       title: "New Negotiation Request",
-      body: `You have a new negotiation request on your ${
-        serviceType === "offer_a_ride"
-          ? "ride offer"
-          : "parcel delivery request"
+      body: `You have a new negotiation from a different user on your ${
+        serviceType === "offer_a_ride" ? "ride offer" : "parcel request"
       }.`,
       type: "NEGOTIATION",
       router:
@@ -134,21 +99,16 @@ exports.createNegotiation = async (req, res) => {
           : "/(details)/details",
       data: {
         negotiationId: newNegotiation._id.toString(),
-        serviceId: service ? service.toString() : null, // Ensured
-        serviceType: serviceType,
+        serviceId: service.toString(),
+        serviceType,
       },
     });
-    // =====================================================================
 
-    console.log("🎉 [NEGOTIATION COMPLETE] Returning 201 JSON payload.");
-    res.status(201).json(populatedNegotiation);
+    console.log("🎉 [SUCCESS] New negotiation created and returned.");
+    res.status(201).json({ success: true, data: populatedNegotiation });
   } catch (err) {
-    console.error(
-      "💥 [NEGOTIATION ERROR] Transaction failure in createNegotiation:",
-      err.message
-    );
-    console.error(err);
-    res.status(400).json({ error: err.message });
+    console.error("💥 [NEGOTIATION ERROR]:", err);
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 

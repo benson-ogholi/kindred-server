@@ -11,6 +11,7 @@ const {
   getParcelById,
   updateParcel,
   deleteParcel,
+  createJoinRide,
 } = require("../../controllers/padiman_route_controllers/pr.parcel.controller");
 const {
   getAllGlobalRequests,
@@ -19,11 +20,9 @@ const {
 // Global Protection: All parcel operations below require a valid login token
 router.use(protect);
 
-// --- Routes ---
-
-// Handles: POST /api/parcels (Create) & GET /api/parcels (Fetch all for logged-in user)
 router.route("/").post(createParcelBooking).get(getUserParcels);
 
+router.post("/create/join-ride", protect, createJoinRide);
 router.route("/:id").get(getParcelById).put(updateParcel).delete(deleteParcel);
 
 router.get("/all", getAllGlobalRequests);

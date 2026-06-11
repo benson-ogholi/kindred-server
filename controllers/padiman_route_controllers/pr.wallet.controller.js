@@ -94,11 +94,24 @@ exports.requestWithdrawal = async (req, res) => {
       return res.status(404).json({ message: "Wallet not found" });
     }
 
-    if (wallet.balance < amount) {
-      return res.status(400).json({ message: "Insufficient balance" });
+    // Ensure withdrawableBalance primitive layer exists as a fallback number type
+    if (typeof wallet.withdrawableBalance !== "number") {
+      wallet.withdrawableBalance = 0;
     }
 
+    // Safety check: Validate the request amount against BOTH general and clear spendable balances
+    if (wallet.balance < amount || wallet.withdrawableBalance < amount) {
+      return res.status(400).json({ 
+        message: "Insufficient clear balance available for withdrawal. Please confirm some funds are not still locked in escrow." 
+      });
+    }
+
+    // --- DEDUCTION OPERATIONS ---
+    // Remove the funds from general cumulative tracking balance
     wallet.balance -= amount;
+    
+    // Remove the funds from the clear withdrawable wallet balance tracking metric
+    wallet.withdrawableBalance -= amount;
 
     // Create new withdrawal object layout to capture system ID reference arrays
     const withdrawalEntry = {
@@ -127,9 +140,9 @@ exports.requestWithdrawal = async (req, res) => {
             : null,
           amount: amount,
           status: "pending",
-          bankName: bankDetails.bankName,
-          accountNumber: bankDetails.accountNumber,
-          accountName: bankDetails.accountName,
+          bankName: bankDetails?.bankName || "N/A",
+          accountNumber: bankDetails?.accountNumber || "N/A",
+          accountName: bankDetails?.accountName || "N/A",
           timeOfRequest: new Date().toISOString(),
         },
       });
