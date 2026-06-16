@@ -1,45 +1,58 @@
+const Negotiation = require("../../models/padiman_route_models/Negotiation");
 const Notification = require("../../models/padiman_route_models/Notification");
 
-// Get all notifications for the logged-in user
 exports.getUserNotifications = async (req, res) => {
   try {
-    const userId = req.user?._id || req.user?.id || req.user; // Support different token structures
-
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        message: "User not authenticated",
-      });
-    }
-
-    console.log(`📬 Fetching notifications for user: ${userId}`);
+    const userId = req.user?._id || req.user?.id || req.user;
 
     const notifications = await Notification.find({ user: userId })
-      .sort({ createdAt: -1 }) // Newest first
-      .limit(100); // Limit to prevent overload
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
 
-    // Optional: Mark all unread as delivered (if you want)
-    // await Notification.updateMany(
-    //   { user: userId, read: false },
-    //   { $set: { delivered: true } }
-    // );
+    const enrichedNotifications = await Promise.all(
+      notifications.map(async (n) => {
+        let enrichedData = { ...n.data };
+
+        if (n.data?.negotiationId) {
+          const negotiation = await Negotiation.findById(n.data.negotiationId)
+            .populate("negotiator", "fullName")
+            .populate("serviceProvider", "fullName")
+            .lean();
+
+          if (negotiation) {
+            // 1. Determine if the current user is the Service Provider
+            // Compare string IDs to be safe
+            const isProvider =
+              userId.toString() === negotiation.serviceProvider?._id.toString();
+
+            // 2. Determine if it is a parcel delivery
+            const isParcel = negotiation.serviceType === "deliver_a_parcel";
+
+            // Add these flags to the data object
+            enrichedData.negotiation = {
+              ...negotiation,
+              isProvider,
+              isParcel,
+            };
+          }
+        }
+
+        return { ...n, data: enrichedData };
+      })
+    );
 
     res.status(200).json({
       success: true,
-      count: notifications.length,
-      notifications,
+      count: enrichedNotifications.length,
+      notifications: enrichedNotifications,
     });
   } catch (error) {
-    console.error("❌ Error fetching user notifications:", error.message);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch notifications",
-      error: error.message,
-    });
+    console.error("❌ Error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch" });
   }
 };
 
-// Mark a single notification as read
 exports.markAsRead = async (req, res) => {
   try {
     const userId = req.user?._id || req.user?.id || req.user;

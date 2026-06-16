@@ -13,6 +13,9 @@ const NegotiationMessageSchema = new mongoose.Schema(
       ref: "PadimanRouteUser",
       required: true,
     },
+    UUID: {
+      type: String,
+    },
     text: {
       type: String,
       required: true,
@@ -30,6 +33,7 @@ const NegotiationMessageSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    pickupCode: { type: String },
     readBy: [
       {
         type: mongoose.Schema.Types.ObjectId,

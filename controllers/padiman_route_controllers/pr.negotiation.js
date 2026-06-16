@@ -1,6 +1,10 @@
+const { default: mongoose } = require("mongoose");
+const JoinRide = require("../../models/padiman_route_models/JoinRide");
 const Negotiation = require("../../models/padiman_route_models/Negotiation");
+const Parcel = require("../../models/padiman_route_models/Parcel");
 const Parcel_Request = require("../../models/padiman_route_models/Parcel_Request");
 const RideOffer = require("../../models/padiman_route_models/RideOffer");
+const { generatePickupCode } = require("../../utils/generatePickupCode");
 const { sendNotification } = require("../../utils/pr/pr_push");
 
 // Create a new negotiation
@@ -252,31 +256,137 @@ exports.getUserNegotiations = async (req, res) => {
 exports.getNegotiationById = async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user;
 
-    // 1. Fetch the base negotiation
+    console.log(`🔍 [getNegotiationById] Fetching negotiation ID: ${id}`);
+
     const negotiation = await Negotiation.findById(id)
-      .populate("negotiator", "name email profileImage")
-      .populate("serviceProvider", "name email profileImage");
+      .populate("negotiator", "fullName email profileImage phone")
+      .populate("serviceProvider", "fullName email profileImage phone")
+      .lean();
 
     if (!negotiation) {
+      console.log("❌ Negotiation not found");
       return res.status(404).json({ error: "Negotiation not found" });
     }
 
-    let serviceDetails = null;
+    console.log("✅ Negotiation base found:", {
+      id: negotiation._id,
+      serviceType: negotiation.serviceType,
+      service: negotiation.service,
+      negotiatorService: negotiation.negotiatorService,
+    });
 
-    // 2. Resolve the parent document (Ride or Parcel)
-    if (negotiation.serviceType === "offer_a_ride") {
-      serviceDetails = await RideOffer.findById(negotiation.service);
-    } else if (negotiation.serviceType === "deliver_a_parcel") {
-      serviceDetails = await Parcel_Request.findById(negotiation.service);
+    let negotiatorServiceData = null;
+    let serviceDetails = null;
+    let pickupCode = negotiation.pickupCode;
+    let shouldDeleteNegotiation = false;
+
+    console.log(`📦 Resolving serviceType: ${negotiation.serviceType}`);
+
+    const isValidObjectId = (value) => {
+      return (
+        mongoose.Types.ObjectId.isValid(value) && String(value).length === 24
+      );
+    };
+
+    switch (negotiation.serviceType) {
+      case "deliver_a_parcel":
+        if (
+          negotiation.negotiatorService &&
+          isValidObjectId(negotiation.negotiatorService)
+        ) {
+          negotiatorServiceData = await Parcel.findById(
+            negotiation.negotiatorService
+          ).lean();
+          console.log("📦 Parcel fetched:", !!negotiatorServiceData);
+        }
+
+        if (negotiation.service && isValidObjectId(negotiation.service)) {
+          serviceDetails = await Parcel_Request.findById(
+            negotiation.service
+          ).lean();
+          console.log("📦 ParcelRequest fetched:", !!serviceDetails);
+        }
+
+        if (!pickupCode && negotiatorServiceData?.parties?.sender?.pickupCode) {
+          pickupCode = negotiatorServiceData.parties.sender.pickupCode;
+        }
+        break;
+
+      case "join_a_ride":
+      case "offer_a_ride":
+        // JoinRide from negotiatorService
+        if (
+          negotiation.negotiatorService &&
+          isValidObjectId(negotiation.negotiatorService)
+        ) {
+          negotiatorServiceData = await JoinRide.findById(
+            negotiation.negotiatorService
+          ).lean();
+          console.log("📦 JoinRide fetched:", !!negotiatorServiceData);
+          if (!pickupCode) pickupCode = negotiatorServiceData?.pickupCode;
+        }
+
+        // RideOffer from service
+        if (negotiation.service && isValidObjectId(negotiation.service)) {
+          serviceDetails = await RideOffer.findById(negotiation.service).lean();
+          console.log("📦 RideOffer fetched:", !!serviceDetails);
+        }
+        break;
+
+      default:
+        console.warn(`⚠️ Unknown serviceType: ${negotiation.serviceType}`);
     }
 
-    // 3. Return the combined object
-    res.status(200).json({
-      ...negotiation.toObject(),
-      serviceDetails, // This contains the full RideOffer or Parcel_Request document
-    });
+    // ==================== AUTO DELETE INVALID NEGOTIATION ====================
+    if (
+      (negotiation.serviceType === "deliver_a_parcel" &&
+        !negotiatorServiceData) ||
+      ((negotiation.serviceType === "join_a_ride" ||
+        negotiation.serviceType === "offer_a_ride") &&
+        !negotiatorServiceData &&
+        !serviceDetails)
+    ) {
+      console.log(
+        "🗑️ Invalid negotiation detected (service data missing). Deleting..."
+      );
+      await Negotiation.findByIdAndDelete(id);
+      return res.status(404).json({
+        error: "Negotiation was invalid and has been removed.",
+      });
+    }
+
+    // ==================== PICKUP CODE FALLBACK ====================
+    if (!pickupCode) {
+      console.log("⚠️ No pickupCode found - Generating fallback...");
+      const senderName =
+        negotiation.negotiator?.fullName?.slice(0, 4) || "USER";
+      pickupCode = `PR-${Date.now()
+        .toString()
+        .slice(-6)}-${senderName.toUpperCase()}`;
+
+      await Negotiation.findByIdAndUpdate(id, { pickupCode });
+      console.log("✅ Generated & saved new pickupCode:", pickupCode);
+    }
+
+    const isProvider =
+      userId.toString() === negotiation.serviceProvider?._id?.toString();
+    const isParcel = negotiation.serviceType === "deliver_a_parcel";
+
+    const finalResponse = {
+      ...negotiation,
+      negotiatorServiceData,
+      serviceDetails,
+      pickupCode,
+      isProvider,
+      isParcel,
+    };
+
+    console.log("🚀 Final response prepared");
+    res.status(200).json(finalResponse);
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error("❌ Error in getNegotiationById:", err);
+    res.status(500).json({ error: err.message });
   }
 };

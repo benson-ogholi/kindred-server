@@ -11,6 +11,7 @@ const joinRideSchema = new mongoose.Schema(
       pickupAddress: String,
       deliveryAddress: String,
     },
+    pickupCode: String,
 
     schedule: {
       type: { type: String }, // This stores 'immediate', 'scheduled', etc.

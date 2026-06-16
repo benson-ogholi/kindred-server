@@ -35,12 +35,14 @@ const pr_parcel_requester = require("./routes/pr/pr.parcel.requester");
 const pr_rider_offer = require("./routes/pr/pr.ride.offer.router");
 const pr_negs = require("./routes/pr/pr.negotiation.router");
 const NegotiationMessage = require("./models/padiman_route_models/NegotiationMessage");
-const pr_pay = require('./routes/pr/payment.routes')
-const pr_notify = require('./routes/pr/pr.notification.router')
-const pr_wallet = require('./routes/pr/pr.wallet')
-const pr_driver = require('./routes/pr/pr.driver.router')
-const pr_admin = require('./routes/pr/admin.auth.router')
-const pr_admin_data = require('./routes/pr/admin')
+const pr_pay = require("./routes/pr/payment.routes");
+const pr_notify = require("./routes/pr/pr.notification.router");
+const pr_wallet = require("./routes/pr/pr.wallet");
+const pr_driver = require("./routes/pr/pr.driver.router");
+const pr_admin = require("./routes/pr/admin.auth.router");
+const pr_admin_data = require("./routes/pr/admin");
+const { sendNotification } = require("./utils/pr/pr_push");
+const Negotiation = require("./models/padiman_route_models/Negotiation");
 
 const app = express();
 const server = http.createServer(app);
@@ -130,80 +132,84 @@ io.on("connection", (socket) => {
   };
 
   // === JOIN CHAT ===
-// === JOIN CHAT ===
-socket.on("join-pr-chat", async ({ negotiationId, userPayload }) => {
-  console.log("DEBUG: join-pr-chat triggered for:", negotiationId);
+  // === JOIN CHAT ===
+  socket.on("join-pr-chat", async ({ negotiationId, userPayload }) => {
+    console.log("DEBUG: join-pr-chat triggered for:", negotiationId);
 
-  // 1. Validation
-  if (!negotiationId || !mongoose.Types.ObjectId.isValid(negotiationId)) {
-    console.error(`❌ Invalid Negotiation ID: ${negotiationId}`);
-    return socket.emit("error", { message: "Invalid negotiation ID format" });
-  }
+    // 1. Validation
+    if (!negotiationId || !mongoose.Types.ObjectId.isValid(negotiationId)) {
+      console.error(`❌ Invalid Negotiation ID: ${negotiationId}`);
+      return socket.emit("error", { message: "Invalid negotiation ID format" });
+    }
 
-  if (!userPayload?.id) {
-    return socket.emit("error", { message: "userPayload with id required" });
-  }
+    if (!userPayload?.id) {
+      return socket.emit("error", { message: "userPayload with id required" });
+    }
 
-  // 2. Join the room
-  socket.join(negotiationId);
+    // 2. Join the room
+    socket.join(negotiationId);
 
-  // 3. Initialize room memory if it doesn't exist
-  if (!rooms.has(negotiationId)) {
-    rooms.set(negotiationId, { users: new Map(), messages: [] });
-  }
+    // 3. Initialize room memory if it doesn't exist
+    if (!rooms.has(negotiationId)) {
+      rooms.set(negotiationId, { users: new Map(), messages: [] });
+    }
 
-  // 4. Track the user
-  const room = rooms.get(negotiationId);
-  room.users.set(socket.id, userPayload);
+    // 4. Track the user
+    const room = rooms.get(negotiationId);
+    room.users.set(socket.id, userPayload);
 
-  try {
-    // 5. FETCH ALL MESSAGES FROM DB
-    // Sort by createdAt ascending so the conversation flow is correct
-    const allMessages = await NegotiationMessage.find({ negotiation: negotiationId })
-      .sort({ createdAt: 1 })
-      .populate("sender", "name fullName email profileImage");
+    try {
+      // 5. FETCH ALL MESSAGES FROM DB
+      // Sort by createdAt ascending so the conversation flow is correct
+      const allMessages = await NegotiationMessage.find({
+        negotiation: negotiationId,
+      })
+        .sort({ createdAt: 1 })
+        .populate("sender", "name fullName email profileImage");
 
-    // Format the messages to match the structure expected by your frontend
-    const formattedMessages = allMessages.map(msg => ({
-      id: msg._id.toString(),
-      negotiation: msg.negotiation.toString(),
-      sender: msg.sender,
-      text: msg.text,
-      attachments: msg.attachments || [],
-      isRead: msg.isRead || false,
-      readBy: msg.readBy || [],
-      timestamp: msg.createdAt,
-      createdAt: msg.createdAt,
-    }));
+      // Format the messages to match the structure expected by your frontend
+      const formattedMessages = allMessages.map((msg) => ({
+        id: msg._id?.toString(),
+        negotiation: msg.negotiation.toString(),
+        sender: msg.sender,
+        text: msg.text,
+        attachments: msg.attachments || [],
+        isRead: msg.isRead || false,
+        readBy: msg.readBy || [],
+        timestamp: msg.createdAt,
+        createdAt: msg.createdAt,
+      }));
 
-    // Update in-memory room storage
-    room.messages = formattedMessages;
+      // Update in-memory room storage
+      room.messages = formattedMessages;
 
-    console.log(`✅ User ${userPayload.id} joined. Sending ${formattedMessages.length} messages.`);
+      console.log(
+        `✅ User ${userPayload.id} joined. Sending ${formattedMessages.length} messages.`
+      );
 
-    // 6. Notify the sender WITH full history
-    socket.emit("room-joined", {
-      users: Array.from(room.users.values()),
-      messages: formattedMessages,
-    });
+      // 6. Notify the sender WITH full history
+      socket.emit("room-joined", {
+        users: Array.from(room.users.values()),
+        messages: formattedMessages,
+      });
 
-    // 7. Notify others in the room
-    socket.to(negotiationId).emit("user-joined", {
-      userPayload,
-      socketId: socket.id,
-    });
-  } catch (err) {
-    console.error("❌ Error fetching chat history:", err);
-    socket.emit("error", { message: "Failed to load chat history" });
-  }
-});
+      // 7. Notify others in the room
+      socket.to(negotiationId).emit("user-joined", {
+        userPayload,
+        socketId: socket.id,
+      });
+    } catch (err) {
+      console.error("❌ Error fetching chat history:", err);
+      socket.emit("error", { message: "Failed to load chat history" });
+    }
+  });
 
   // === SEND MESSAGE ===
   // Inside pr-chat-message
   socket.on("pr-chat-message", async (payload) => {
     console.log("📥 [Server] Received 'pr-chat-message' payload:", payload);
 
-    const { negotiation, text, attachments = [] , senderId} = payload;
+    const { negotiation, text, attachments = [], senderId, clientId } = payload;
     const cleanNegotiationId = getCleanId(negotiation);
 
     console.log(`🔍 [Server] Cleaned Negotiation ID: ${cleanNegotiationId}`);
@@ -235,7 +241,46 @@ socket.on("join-pr-chat", async ({ negotiationId, userPayload }) => {
         sender: finalSender,
         text: text.trim(),
         attachments: Array.isArray(attachments) ? attachments : [],
+        UUID: clientId,
       });
+
+      const negotiationDoc = await Negotiation.findById(cleanNegotiationId)
+        .populate("negotiator", "fullName")
+        .populate("serviceProvider", "fullName");
+
+      if (negotiationDoc) {
+        // Determine IDs
+        const negotiatorId = negotiationDoc.negotiator?._id.toString();
+        const providerId = negotiationDoc.serviceProvider?._id.toString();
+        const senderIdStr = finalSender.toString();
+
+        const receiverId =
+          senderIdStr === negotiatorId ? providerId : negotiatorId;
+
+        // Determine Sender's Name
+        // Check if sender is the negotiator or the provider to grab the right name
+        const senderName =
+          senderIdStr === negotiatorId
+            ? negotiationDoc.negotiator?.fullName
+            : negotiationDoc.serviceProvider?.fullName || "A user";
+
+        if (receiverId) {
+          const notificationData = {
+            // 💡 This now includes the sender's name dynamically
+            title: `New message from ${senderName}`,
+            body: text.length > 50 ? text.substring(0, 47) + "..." : text,
+            router: "CHAT_SCREEN",
+            type: "MESSAGE",
+            data: {
+              negotiationId: cleanNegotiationId,
+            },
+          };
+
+          sendNotification(receiverId, notificationData).catch((err) =>
+            console.error("Notification failed:", err)
+          );
+        }
+      }
 
       const populated = await chatMessage.populate({
         path: "sender",
@@ -252,6 +297,8 @@ socket.on("join-pr-chat", async ({ negotiationId, userPayload }) => {
         readBy: populated.readBy || [],
         timestamp: populated.createdAt,
         createdAt: populated.createdAt,
+        UUID: clientId, // ← ADD THIS
+        clientId, // ← Keep for compatibility
       };
 
       console.log(

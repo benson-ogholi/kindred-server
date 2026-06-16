@@ -13,6 +13,7 @@ const {
   getUserDashboardOrders,
   getUserAllRequests,
   getRequestById,
+  getAppUpdates
 } = require("../../controllers/padiman_route_controllers/pr.user.controllers");
 
 const { protect } = require("../../middlewares/pr/pr.authMiddleware");
@@ -24,6 +25,7 @@ const upload = multer({
 });
 
 // ====================== PROFILE ROUTES ======================
+router.get("/app-updates", getAppUpdates);
 
 // Get User Profile
 router.get("/profile", protect, getProfile);

@@ -5,6 +5,7 @@ const RideOffer = require("../../models/padiman_route_models/RideOffer");
 const Parcel = require("../../models/padiman_route_models/Parcel");
 const { uploadToBackblaze } = require("../../utils/uploadToBackblaze");
 const JoinRide = require("../../models/padiman_route_models/JoinRide");
+const { generatePickupCode } = require("../../utils/generatePickupCode");
 
 // GET PROFILE
 const getProfile = async (req, res) => {
@@ -308,9 +309,11 @@ const getRequestById = async (req, res) => {
 
     let requestData = null;
     let modelName = "";
+    let changesMade = false;
 
     const lowerType = type.toLowerCase();
 
+    // 1. Fetch data based on type
     switch (lowerType) {
       case "parcel":
         requestData = await Parcel.findById(id).populate(
@@ -357,16 +360,89 @@ const getRequestById = async (req, res) => {
       });
     }
 
-    // Format dates before sending response
-    const formattedData = formatRequestDates(requestData);
+    // 2. Generate and attach pickup codes conditionally based on model type
+    if (lowerType === "parcel") {
+      if (!requestData.parties) {
+        requestData.parties = { sender: {}, recipient: {} };
+      }
+      if (!requestData.parties.sender) requestData.parties.sender = {};
+      if (!requestData.parties.recipient) requestData.parties.recipient = {};
 
-    res.status(200).json({
+      if (!requestData.parties.sender.pickupCode) {
+        const code = generatePickupCode(
+          requestData.parties.sender.fullName || "",
+          requestData.parties.recipient.fullName || ""
+        );
+        requestData.set("parties.sender.pickupCode", code);
+        changesMade = true;
+      }
+
+      if (!requestData.parties.recipient.pickupCode) {
+        const code = generatePickupCode(
+          requestData.parties.sender.fullName || "",
+          requestData.parties.recipient.fullName || ""
+        );
+        requestData.set("parties.recipient.pickupCode", code);
+        changesMade = true;
+      }
+
+      if (changesMade) {
+        requestData.markModified("parties");
+      }
+    } else if (lowerType === "joinride") {
+      if (!requestData.pickupCode) {
+        const code = generatePickupCode("", "");
+        requestData.set("pickupCode", code);
+        changesMade = true;
+      }
+    }
+
+    // 3. Save updates back to database if codes were generated
+    if (changesMade) {
+      await requestData.save();
+    }
+
+    // 4. Debug Console Logging for generated codes
+    if (lowerType === "parcel") {
+      console.warn(
+        "--- [PARCEL LOG] ---",
+        JSON.stringify(
+          {
+            parcelId: requestData._id,
+            senderPickupCode: requestData.parties?.sender?.pickupCode,
+            recipientPickupCode: requestData.parties?.recipient?.pickupCode,
+          },
+          null,
+          2
+        )
+      );
+    } else if (lowerType === "joinride") {
+      console.warn(
+        "--- [JOINRIDE LOG] ---",
+        JSON.stringify(
+          {
+            rideId: requestData._id,
+            ridePickupCode: requestData.pickupCode,
+          },
+          null,
+          2
+        )
+      );
+    }
+
+    // 5. Convert document to plain object so it behaves cleanly during mutations and serialization
+    const plainData = requestData.toObject();
+
+    // Format dates before sending response
+    const formattedData = formatRequestDates(plainData);
+
+    return res.status(200).json({
       success: true,
       data: formattedData,
     });
   } catch (error) {
     console.error("Get request by ID error:", error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Server error while fetching request",
     });
@@ -384,7 +460,11 @@ const formatRequestDates = (obj) => {
   const formatDate = (dateInput, fieldName = "") => {
     if (!dateInput) return null;
 
-    console.log(`[DATE DEBUG] Field: ${fieldName} | Raw Input:`, dateInput, `| Type: ${typeof dateInput}`);
+    console.log(
+      `[DATE DEBUG] Field: ${fieldName} | Raw Input:`,
+      dateInput,
+      `| Type: ${typeof dateInput}`
+    );
 
     let d;
 
@@ -395,14 +475,16 @@ const formatRequestDates = (obj) => {
 
       // Fallback attempts
       if (isNaN(d.getTime())) {
-        console.log(`[DATE DEBUG] First parse failed for: ${dateInput} → Trying fallback...`);
-        
+        console.log(
+          `[DATE DEBUG] First parse failed for: ${dateInput} → Trying fallback...`
+        );
+
         let cleaned = dateInput.trim();
-        
+
         // Common fixes
-        cleaned = cleaned.replace(" ", "T");           // "2025-03-24 02:35" → "2025-03-24T02:35"
-        cleaned = cleaned.replace(/\.000Z?$/, "");     // Remove .000Z sometimes
-        cleaned = cleaned.split("+")[0];               // Remove timezone offset
+        cleaned = cleaned.replace(" ", "T"); // "2025-03-24 02:35" → "2025-03-24T02:35"
+        cleaned = cleaned.replace(/\.000Z?$/, ""); // Remove .000Z sometimes
+        cleaned = cleaned.split("+")[0]; // Remove timezone offset
 
         d = new Date(cleaned);
       }
@@ -413,7 +495,10 @@ const formatRequestDates = (obj) => {
     }
 
     if (isNaN(d.getTime())) {
-      console.error(`[DATE ERROR] Invalid date for field "${fieldName}":`, dateInput);
+      console.error(
+        `[DATE ERROR] Invalid date for field "${fieldName}":`,
+        dateInput
+      );
       return dateInput; // Return original so frontend doesn't break
     }
 
@@ -431,24 +516,40 @@ const formatRequestDates = (obj) => {
     const ordinal = (n) => {
       if (n > 3 && n < 21) return "th";
       switch (n % 10) {
-        case 1: return "st";
-        case 2: return "nd";
-        case 3: return "rd";
-        default: return "th";
+        case 1:
+          return "st";
+        case 2:
+          return "nd";
+        case 3:
+          return "rd";
+        default:
+          return "th";
       }
     };
 
-    const formatted = `${dayName} ${hours}:${minutes}${ampm} ${day}${ordinal(day)} ${monthName} ${year}`;
+    const formatted = `${dayName} ${hours}:${minutes}${ampm} ${day}${ordinal(
+      day
+    )} ${monthName} ${year}`;
     console.log(`[DATE SUCCESS] ${fieldName} → ${formatted}`);
-    
+
     return formatted;
   };
 
   // Format top-level fields
   const dateFields = [
-    "createdAt", "updatedAt", "departureTime", "dispatchDateStart",
-    "dispatchDateEnd", "pickupTime", "deliveryTime", "date",
-    "rideDate", "startDate", "endDate", "availableFrom", "availableUntil"
+    "createdAt",
+    "updatedAt",
+    "departureTime",
+    "dispatchDateStart",
+    "dispatchDateEnd",
+    "pickupTime",
+    "deliveryTime",
+    "date",
+    "rideDate",
+    "startDate",
+    "endDate",
+    "availableFrom",
+    "availableUntil",
   ];
 
   dateFields.forEach((field) => {
@@ -461,9 +562,18 @@ const formatRequestDates = (obj) => {
   if (data.negotiations && Array.isArray(data.negotiations)) {
     data.negotiations = data.negotiations.map((neg, index) => {
       console.log(`[DATE DEBUG] Processing negotiation #${index}`);
-      if (neg.createdAt) neg.createdAt = formatDate(neg.createdAt, `negotiations[${index}].createdAt`);
-      if (neg.updatedAt) neg.updatedAt = formatDate(neg.updatedAt, `negotiations[${index}].updatedAt`);
-      if (neg.date) neg.date = formatDate(neg.date, `negotiations[${index}].date`);
+      if (neg.createdAt)
+        neg.createdAt = formatDate(
+          neg.createdAt,
+          `negotiations[${index}].createdAt`
+        );
+      if (neg.updatedAt)
+        neg.updatedAt = formatDate(
+          neg.updatedAt,
+          `negotiations[${index}].updatedAt`
+        );
+      if (neg.date)
+        neg.date = formatDate(neg.date, `negotiations[${index}].date`);
       return neg;
     });
   }
@@ -480,6 +590,46 @@ const formatRequestDates = (obj) => {
   return data;
 };
 
+// ====================== APP UPDATES / VERSIONING ======================
+// ====================== APP UPDATES / VERSIONING ======================
+const getAppUpdates = async (req, res) => {
+  try {
+    const appUpdate = {
+      currentVersion: "1.2.4",
+      latestVersion: "1.2.5",
+      isUpdateAvailable: true,
+      forceUpdate: true,
+      updateTitle: "New Features & Improvements",
+      updateDescription: `
+• Improved receipt sharing experience
+• Better request filtering (unknown pickups removed)
+• Enhanced dark mode consistency
+• Faster loading on My Requests screen
+• Bug fixes and performance improvements
+      `.trim(),
+      releaseDate: "June 16, 2026",
+      // Updated: Split into platform-specific links
+      links: {
+        android:
+          "https://play.google.com/store/apps/details?id=com.padimanroute",
+        ios: "https://apps.apple.com/app/padiman-route/idYOUR_APP_ID",
+      },
+    };
+
+    res.status(200).json({
+      success: true,
+      data: appUpdate,
+      message: "App update information retrieved successfully",
+    });
+  } catch (error) {
+    console.error("Get app updates error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch app updates",
+    });
+  }
+};
+
 module.exports = {
   getProfile,
   updateProfile,
@@ -490,4 +640,5 @@ module.exports = {
   getUserDashboardOrders, // Exported to your route tree configuration files
   getUserAllRequests,
   getRequestById,
+  getAppUpdates,
 };

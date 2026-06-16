@@ -27,7 +27,8 @@ const notificationSchema = new mongoose.Schema(
         "CHAT",
         "GENERAL",
         "NEGOTIATION",
-        "WITHDRAWAL"
+        "WITHDRAWAL",
+        "MESSAGE",
       ],
       default: "GENERAL",
     },
@@ -43,6 +44,7 @@ const notificationSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
   },
   { timestamps: true }
 );

@@ -15,10 +15,12 @@ const parcelSchema = new mongoose.Schema(
       sender: {
         fullName: String,
         contact: String,
+        pickupCode: String
       },
       recipient: {
         fullName: String,
         contact: String,
+        pickupCode: String
       },
     },
     item: {
