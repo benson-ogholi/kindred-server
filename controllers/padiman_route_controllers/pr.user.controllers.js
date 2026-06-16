@@ -597,8 +597,8 @@ const getAppUpdates = async (req, res) => {
     const appUpdate = {
       currentVersion: "1.2.4",
       latestVersion: "1.2.5",
-      isUpdateAvailable: true,
-      forceUpdate: true,
+      isUpdateAvailable: false,
+      forceUpdate: false,
       updateTitle: "New Features & Improvements",
       updateDescription: `
 • Improved receipt sharing experience
