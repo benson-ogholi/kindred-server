@@ -116,8 +116,7 @@ exports.getAllRequests = async (req, res) => {
 
 exports.getAllGlobalRequests = async (req, res) => {
   try {
-    const userId = req.user; // Get logged-in user from protect middleware
-
+    const userId = req.user;
     if (!userId) {
       return res.status(401).json({
         success: false,
@@ -140,7 +139,7 @@ exports.getAllGlobalRequests = async (req, res) => {
 
     // 2. Fetch all ParcelRequests EXCLUDING the ones created by the logged-in user
     let requests = await ParcelRequest.find({
-      user: { $ne: userId }, // <-- EXCLUDE OWN CREATED REQUESTS HERE
+      user: { $ne: userId },
     })
       .sort({ createdAt: -1 })
       .populate("user", "fullName phone email isVerified profileImage")
@@ -158,7 +157,7 @@ exports.getAllGlobalRequests = async (req, res) => {
         ],
       });
 
-    // 3. Enrich each request
+    // 3. Enrich each request + apply name masking
     requests = requests.map((request) => {
       const requestObj = request.toObject ? request.toObject() : { ...request };
 
@@ -169,13 +168,45 @@ exports.getAllGlobalRequests = async (req, res) => {
         requestObj.myNegotiation = matchingNegotiation;
       }
 
+      // --- NAME MASKING LOGIC ---
+      // For the parcel request creator's fullName
+      if (requestObj.user && requestObj.user.fullName) {
+        const isPaid = matchingNegotiation?.isPaid === true;
+        if (isPaid) {
+          // Return full name if paid
+          requestObj.user.fullName = requestObj.user.fullName;
+        } else {
+          // First 4 characters + ******
+          const name = requestObj.user.fullName.trim();
+          const masked =
+            name.length > 4 ? name.substring(0, 4) + "******" : name + "******";
+          requestObj.user.fullName = masked;
+        }
+      }
+
+      // Optional: You can also mask names in negotiations if needed
+      if (requestObj.negotiations && Array.isArray(requestObj.negotiations)) {
+        requestObj.negotiations.forEach((neg) => {
+          // Mask negotiator name unless paid
+          if (neg.negotiator && neg.negotiator.fullName) {
+            const isPaid = neg.isPaid === true;
+            if (!isPaid) {
+              const name = neg.negotiator.fullName.trim();
+              neg.negotiator.fullName =
+                name.length > 4
+                  ? name.substring(0, 4) + "******"
+                  : name + "******";
+            }
+          }
+          // Same for serviceProvider if you want
+        });
+      }
+      // -------------------------------
+
       // --- CRITICAL RULE INJECTION ---
-      // Check if ANY negotiation linked to this request is no longer 'ride pending'
       const hasActiveOrClosedRide = requestObj.negotiations?.some(
         (neg) => neg.status && neg.status !== "ride pending"
       );
-
-      // Disable further interactions if it has stepped past initialization phase
       requestObj.isDisabled = !!hasActiveOrClosedRide;
       // -------------------------------
 
@@ -185,14 +216,10 @@ exports.getAllGlobalRequests = async (req, res) => {
     // 4. Sort: User's negotiations first, then others
     requests.sort((a, b) => {
       if (b.isNegotiator !== a.isNegotiator) {
-        return b.isNegotiator ? 1 : -1; // true first
+        return b.isNegotiator ? 1 : -1;
       }
       return new Date(b.createdAt) - new Date(a.createdAt);
     });
-
-    console.log("Total requests (excluding own):", requests.length);
-    console.log("User ID:", userId);
-    console.log("Negotiations found for user:", relevantNegotiations.length);
 
     res.status(200).json({
       success: true,

@@ -143,7 +143,7 @@ exports.getAllRides = async (req, res) => {
   try {
     console.log("[RIDE CONTROLLER] Fetching all active transit pipelines...");
 
-    const userId = req.user; // Get logged-in user from protect middleware
+    const userId = req.user;
 
     if (!userId) {
       return res.status(401).json({
@@ -186,11 +186,10 @@ exports.getAllRides = async (req, res) => {
         ],
       });
 
-    // 3. Enrich each ride request
+    // 3. Enrich each ride + apply name masking
     rides = rides.map((ride) => {
       const rideObj = ride.toObject ? ride.toObject() : { ...ride };
 
-      // Match using the ride's ID
       const matchingNegotiation = negotiationMap.get(ride._id.toString());
       rideObj.isNegotiator = !!matchingNegotiation;
 
@@ -198,23 +197,53 @@ exports.getAllRides = async (req, res) => {
         rideObj.myNegotiation = matchingNegotiation;
       }
 
+      // --- NAME MASKING LOGIC ---
+      // For the ride driver's fullName (the creator of the ride offer)
+      if (rideObj.driver && rideObj.driver.fullName) {
+        const isPaid = matchingNegotiation?.isPaid === true;
+
+        if (isPaid) {
+          // Show full name if paid
+          rideObj.driver.fullName = rideObj.driver.fullName;
+        } else {
+          // Mask: First 4 characters + ******
+          const name = rideObj.driver.fullName.trim();
+          const masked =
+            name.length > 4 ? name.substring(0, 4) + "******" : name + "******";
+          rideObj.driver.fullName = masked;
+        }
+      }
+
+      // Optional: Mask names inside negotiations array for consistency
+      if (rideObj.negotiations && Array.isArray(rideObj.negotiations)) {
+        rideObj.negotiations.forEach((neg) => {
+          if (neg.negotiator && neg.negotiator.fullName) {
+            if (neg.isPaid !== true) {
+              const name = neg.negotiator.fullName.trim();
+              neg.negotiator.fullName =
+                name.length > 4
+                  ? name.substring(0, 4) + "******"
+                  : name + "******";
+            }
+          }
+        });
+      }
+      // -------------------------------
+
       // --- CRITICAL RULE INJECTION ---
-      // Check if ANY negotiation linked to this ride is no longer 'ride pending'
       const hasActiveOrClosedRide = rideObj.negotiations?.some(
         (neg) => neg.status && neg.status !== "ride pending"
       );
-
-      // Disable further interactions if it has stepped past initialization phase
       rideObj.isDisabled = !!hasActiveOrClosedRide;
       // -------------------------------
 
       return rideObj;
     });
 
-    // 4. Sort: User's negotiations first, then others by creation date
+    // 4. Sort: User's negotiations first, then others
     rides.sort((a, b) => {
       if (b.isNegotiator !== a.isNegotiator) {
-        return b.isNegotiator ? 1 : -1; // true values first
+        return b.isNegotiator ? 1 : -1;
       }
       return new Date(b.createdAt) - new Date(a.createdAt);
     });
@@ -276,9 +305,6 @@ exports.getMyRides = async (req, res) => {
 };
 
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
-
-
-
 
 exports.getRideById = async (req, res) => {
   console.log(
@@ -364,7 +390,7 @@ exports.getRideById = async (req, res) => {
       for (let neg of dataObj.negotiations) {
         if (neg.negotiatorService && isValidId(neg.negotiatorService)) {
           try {
-            // ✅ Fetching the entire JoinRide document without structural omissions 
+            // ✅ Fetching the entire JoinRide document without structural omissions
             const serviceData = await JoinRide.findById(
               neg.negotiatorService
             ).lean();
@@ -493,4 +519,3 @@ exports.getRideById = async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
-
