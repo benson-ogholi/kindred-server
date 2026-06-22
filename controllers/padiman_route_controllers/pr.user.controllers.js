@@ -252,6 +252,9 @@ const getUserAllRequests = async (req, res) => {
   try {
     const userId = req.user; // From auth middleware
 
+    console.log(`🔍 [FETCH REQUESTS] For user: ${userId}`);
+
+    // 1. Fetch all requests in parallel
     const [parcels, joinRides, parcelRequests, rideOffers] = await Promise.all([
       Parcel.find({ requestedBy: userId }).sort({ createdAt: -1 }),
       JoinRide.find({ requestedBy: userId }).sort({ createdAt: -1 }),
@@ -259,11 +262,126 @@ const getUserAllRequests = async (req, res) => {
       RideOffer.find({ driver: userId }).sort({ createdAt: -1 }),
     ]);
 
-    // Format dates for all requests
-    const formattedParcels = parcels.map(formatRequestDates);
-    const formattedJoinRides = joinRides.map(formatRequestDates);
-    const formattedParcelRequests = parcelRequests.map(formatRequestDates);
-    const formattedRideOffers = rideOffers.map(formatRequestDates);
+    console.log(
+      `📊 [RAW COUNTS] Parcels: ${parcels.length}, JoinRides: ${joinRides.length}, ParcelRequests: ${parcelRequests.length}, RideOffers: ${rideOffers.length}`
+    );
+
+    // ====================== 72 HOURS EXPIRATION LOGIC ======================
+    const seventyTwoHoursAgo = new Date(Date.now() - 72 * 60 * 60 * 1000);
+    console.log(`⏰ [EXPIRATION CHECK] 72hrs ago: ${seventyTwoHoursAgo}`);
+
+    const expireIfNeeded = async (item, model) => {
+      if (!item) return item;
+
+      const status = item.status?.toLowerCase() || "";
+      const isPending = status.includes("pending") || status === "ride pending";
+
+      if (isPending && item.createdAt < seventyTwoHoursAgo) {
+        console.log(
+          `🕒 [AUTO EXPIRE] ${item._id} (${model.modelName}) - Pending >72hrs → Expired`
+        );
+
+        // Update in database
+        await model.findByIdAndUpdate(
+          item._id,
+          { status: "expired" },
+          { new: true }
+        );
+
+        // Update the in-memory object
+        item.status = "expired";
+      }
+      return item;
+    };
+
+    // Apply expiration check + update for each type
+    for (const p of parcels) await expireIfNeeded(p, Parcel);
+    for (const j of joinRides) await expireIfNeeded(j, JoinRide);
+    for (const pr of parcelRequests) await expireIfNeeded(pr, ParcelRequest);
+    for (const ro of rideOffers) await expireIfNeeded(ro, RideOffer);
+    // =====================================================================
+
+    // 2. Collect all possible service IDs (safe check)
+    const allServiceIds = [
+      ...parcels.map((p) => p._id.toString()),
+      ...joinRides.map((j) => j._id.toString()),
+      ...parcelRequests.map((pr) => pr._id.toString()),
+      ...rideOffers.map((ro) => ro._id.toString()),
+    ].filter(Boolean);
+
+    let negotiations = [];
+
+    // 3. Fetch related negotiations safely
+    if (allServiceIds.length > 0) {
+      negotiations = await Negotiation.find({
+        $or: [
+          { service: { $in: allServiceIds } },
+          { negotiatorService: { $in: allServiceIds } },
+        ],
+      }).sort({ updatedAt: -1 });
+    }
+
+    console.log(`🤝 [NEGOTIATIONS FOUND] Total: ${negotiations.length}`);
+
+    // 4. Create status map (serviceId → latest negotiation)
+    const statusMap = new Map();
+
+    negotiations.forEach((neg) => {
+      const serviceId =
+        neg.service?.toString() || neg.negotiatorService?.toString();
+      if (serviceId) {
+        const existing = statusMap.get(serviceId);
+        if (!existing || neg.updatedAt > existing.updatedAt) {
+          statusMap.set(serviceId, {
+            status: neg.status,
+            updatedAt: neg.updatedAt,
+          });
+        }
+      }
+    });
+
+    console.log(
+      `📌 [STATUS MAP CREATED] ${statusMap.size} services synced from negotiations`
+    );
+
+    // 5. Format dates + Sync latest status from Negotiation
+    const formatAndSyncStatus = (item) => {
+      if (!item) return null;
+
+      const formatted = formatRequestDates(item);
+      const itemId = item._id?.toString();
+
+      if (itemId && statusMap.has(itemId)) {
+        const negData = statusMap.get(itemId);
+        console.log(
+          `🔄 [STATUS SYNC] ${itemId} (${
+            item.constructor?.modelName || "Unknown"
+          }) → ${negData.status}`
+        );
+        formatted.status = negData.status;
+      }
+
+      return formatted;
+    };
+
+    const formattedParcels = parcels.map(formatAndSyncStatus).filter(Boolean);
+    const formattedJoinRides = joinRides
+      .map(formatAndSyncStatus)
+      .filter(Boolean);
+    const formattedParcelRequests = parcelRequests
+      .map(formatAndSyncStatus)
+      .filter(Boolean);
+    const formattedRideOffers = rideOffers
+      .map(formatAndSyncStatus)
+      .filter(Boolean);
+
+    const total =
+      formattedParcels.length +
+      formattedJoinRides.length +
+      formattedParcelRequests.length +
+      formattedRideOffers.length;
+
+    console.log(`✅ [FINAL RESPONSE] Total requests: ${total}`);
 
     res.status(200).json({
       success: true,
@@ -272,15 +390,11 @@ const getUserAllRequests = async (req, res) => {
         joinRides: formattedJoinRides,
         parcelRequests: formattedParcelRequests,
         rideOffers: formattedRideOffers,
-        total:
-          formattedParcels.length +
-          formattedJoinRides.length +
-          formattedParcelRequests.length +
-          formattedRideOffers.length,
+        total: total,
       },
     });
   } catch (error) {
-    console.error("Get user all requests error:", error);
+    console.error("💥 [Get user all requests error]:", error);
     res.status(500).json({
       success: false,
       message: "Failed to fetch user requests",

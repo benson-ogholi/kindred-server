@@ -168,68 +168,168 @@ exports.cancelRide = async (req, res) => {
 // Update general details (amount, confirmed, paid, status)
 exports.updateNegotiation = async (req, res) => {
   console.log(`🔄 [UPDATE NEGOTIATION START] ID: ${req.params.id}`);
-  console.log(
-    "📦 [REQUEST BODY] Updates requested:",
-    JSON.stringify(req.body, null, 2)
-  );
+  console.log("📦 [REQUEST BODY]", JSON.stringify(req.body, null, 2));
 
   try {
     const updates = req.body;
+    const negotiationId = req.params.id;
 
-    // Check if the document exists before attempting the update
-    const existing = await Negotiation.findById(req.params.id);
+    // 1. Check if negotiation exists
+    console.log(
+      `🔍 [CHECK EXISTENCE] Looking for Negotiation ID: ${negotiationId}`
+    );
+    const existing = await Negotiation.findById(negotiationId);
+
     if (!existing) {
       console.log(
-        `❌ [NOT FOUND] No negotiation found with ID: ${req.params.id}`
+        `❌ [NOT FOUND] No negotiation found with ID: ${negotiationId}`
       );
       return res
         .status(404)
         .json({ success: false, message: "Negotiation not found" });
     }
 
-    const updated = await Negotiation.findByIdAndUpdate(
-      req.params.id,
-      { $set: updates }, // Use $set for explicit field updates
-      { new: true, runValidators: true } // Return updated doc and enforce schema
-    );
-
     console.log(
-      "✅ [UPDATE SUCCESS] Result:",
-      JSON.stringify(updated, null, 2)
+      `✅ [EXISTENCE CHECK PASSED] Found negotiation with current status: ${existing.status}`
     );
 
-    // ====================== SEND STATUS/PRICING UPDATE NOTIFICATION ======================
-    // Fire notifications conditionally if status or price-altering updates are pushed through
+    // 2. Perform the update
+    console.log(`✍️ [PERFORMING UPDATE] Applying updates...`);
+    const updated = await Negotiation.findByIdAndUpdate(
+      negotiationId,
+      { $set: updates },
+      { new: true, runValidators: true }
+    );
+
+    console.log("✅ [NEGOTIATION UPDATED SUCCESSFULLY]");
+    console.log("📊 [UPDATED DOCUMENT]", JSON.stringify(updated, null, 2));
+
+    // 3. Status Sync Logic
+    if (updated.status && updated.status !== existing.status) {
+      console.log(
+        `🔄 [STATUS CHANGE DETECTED] Old: ${existing.status} → New: ${updated.status}`
+      );
+
+      let serviceModel;
+      let serviceIdField = "service";
+      let serviceType = updated.serviceType;
+
+      console.log(`📋 [SERVICE TYPE] Processing serviceType: ${serviceType}`);
+
+      switch (serviceType) {
+        case "offer_a_ride":
+          serviceModel = RideOffer;
+          serviceIdField = "service";
+          console.log(`🚗 [RIDE OFFER] Will sync with RideOffer model`);
+          break;
+
+        case "join_a_ride":
+          serviceModel = JoinRide;
+          serviceIdField = "negotiatorService";
+          console.log(
+            `👥 [JOIN RIDE] Will sync with JoinRide model using negotiatorService`
+          );
+          break;
+
+        case "deliver_a_parcel":
+          console.log(`📦 [PARCEL] Checking which parcel model to use...`);
+          if (updated.service) {
+            serviceModel = Parcel_Request;
+            serviceIdField = "service";
+            console.log(`📋 Using Parcel_Request via 'service' field`);
+          } else if (updated.negotiatorService) {
+            serviceModel = Parcel;
+            serviceIdField = "negotiatorService";
+            console.log(`📋 Using Parcel via 'negotiatorService' field`);
+          } else {
+            console.log(
+              `⚠️ [PARCEL] No service or negotiatorService ID found for sync`
+            );
+          }
+          break;
+
+        default:
+          console.warn(
+            `⚠️ [UNKNOWN SERVICE TYPE] ${serviceType} - No status sync will be performed`
+          );
+      }
+
+      if (serviceModel && updated[serviceIdField]) {
+        const serviceId = updated[serviceIdField];
+        console.log(
+          `🔗 [SYNCING STATUS] Updating service ${serviceIdField}: ${serviceId} to status: ${updated.status}`
+        );
+
+        const serviceUpdateResult = await serviceModel.findByIdAndUpdate(
+          serviceId,
+          { status: updated.status },
+          { new: true }
+        );
+
+        if (serviceUpdateResult) {
+          console.log(
+            `✅ [SERVICE STATUS SYNCED SUCCESSFULLY] ${serviceType} status updated to ${updated.status}`
+          );
+          console.log(
+            `📊 [UPDATED SERVICE]`,
+            JSON.stringify(serviceUpdateResult, null, 2)
+          );
+        } else {
+          console.warn(
+            `❌ [SERVICE SYNC FAILED] Service with ID ${serviceId} not found`
+          );
+        }
+      } else {
+        console.log(
+          `⚠️ [NO SYNC PERFORMED] Missing serviceModel or service ID`
+        );
+      }
+    } else {
+      console.log(`ℹ️ [NO STATUS CHANGE] Status remains: ${updated.status}`);
+    }
+
+    // 4. Notification
+    console.log(`🛎️ [NOTIFICATION PREPARATION] Preparing notification...`);
+
     const actingUser = req.user ? req.user.toString() : null;
     const recipientId =
       actingUser === updated.negotiator.toString()
         ? updated.serviceProvider
         : updated.negotiator;
 
-    console.log(
-      `🛎️ [NOTIFICATION] Relaying status synchronization update payload to: ${recipientId}`
-    );
+    console.log(`📨 [NOTIFICATION] Sending to recipient: ${recipientId}`);
 
     await sendNotification(recipientId, {
       title: "Negotiation Updated",
-      body: `Your active offer status details have been modified to: ${updated.status}.`,
+      body: `Your negotiation status has been updated to: ${updated.status}`,
       type: "NEGOTIATION",
       router:
-        updated.serviceType === "offer_a_ride"
+        updated.serviceType === "offer_a_ride" ||
+        updated.serviceType === "join_a_ride"
           ? "/(details)/ride"
           : "/(details)/details",
       data: {
         negotiationId: updated._id.toString(),
-        serviceId: updated.service ? updated.service.toString() : null, // Ensured
+        serviceId:
+          updated.service?.toString() ||
+          updated.negotiatorService?.toString() ||
+          null,
         serviceType: updated.serviceType,
         status: updated.status,
       },
     });
-    // =====================================================================================
 
+    console.log(`✅ [NOTIFICATION SENT] Successfully triggered notification`);
+
+    // Final Response
+    console.log(
+      `🎉 [UPDATE NEGOTIATION COMPLETED SUCCESSFULLY] ID: ${negotiationId}`
+    );
     res.status(200).json({ success: true, data: updated });
   } catch (err) {
-    console.error("💥 [UPDATE FAILED] Error details:", err.message);
+    console.error("💥 [UPDATE NEGOTIATION FAILED]");
+    console.error("Error Message:", err.message);
+    console.error("Error Stack:", err.stack);
     res.status(400).json({ success: false, error: err.message });
   }
 };
@@ -306,7 +406,7 @@ exports.getNegotiationById = async (req, res) => {
           serviceDetails = await Parcel_Request.findById(
             negotiation.service
           ).lean();
-          console.log("📦 ParcelRequest fetched:", !!serviceDetails);
+          console.log("📦 Parcel_Request fetched:", !!serviceDetails);
         }
 
         if (!pickupCode && negotiatorServiceData?.parties?.sender?.pickupCode) {
