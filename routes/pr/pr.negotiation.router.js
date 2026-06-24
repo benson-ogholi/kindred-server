@@ -20,6 +20,9 @@ router.patch("/:id", protect, updateNegotiation);
 
 // GET /api/negotiations/user/:userId
 router.get("/user/:userId", protect, getUserNegotiations);
+
+router.get("/my-negotiations", protect, getUserNegotiations);
+
 // GET a single negotiation by ID
 router.get("/:id", protect, getNegotiationById);
 module.exports = router;
