@@ -6,7 +6,7 @@ const Parcel_Request = require("../../models/padiman_route_models/Parcel_Request
 const RideOffer = require("../../models/padiman_route_models/RideOffer");
 const { generatePickupCode } = require("../../utils/generatePickupCode");
 const { sendNotification } = require("../../utils/pr/pr_push");
-
+const { syncServiceStatus } = require('../../utils/pr/syncServiceStatus');
 // Create a new negotiation
 exports.createNegotiation = async (req, res) => {
   console.log("🚀 [NEGOTIATION START] createNegotiation controller invoked");
@@ -165,10 +165,10 @@ exports.cancelRide = async (req, res) => {
   }
 };
 
-// Update general details (amount, confirmed, paid, status)
 exports.updateNegotiation = async (req, res) => {
   console.log(`🔄 [UPDATE NEGOTIATION START] ID: ${req.params.id}`);
   console.log("📦 [REQUEST BODY]", JSON.stringify(req.body, null, 2));
+  console.log("👤 [AUTH USER]", req.user ? req.user.toString() : "No user");
 
   try {
     const updates = req.body;
@@ -189,9 +189,9 @@ exports.updateNegotiation = async (req, res) => {
         .json({ success: false, message: "Negotiation not found" });
     }
 
-    console.log(
-      `✅ [EXISTENCE CHECK PASSED] Found negotiation with current status: ${existing.status}`
-    );
+    console.log(`✅ [EXISTENCE CHECK PASSED] Found negotiation`);
+    console.log(`📊 [EXISTING DOCUMENT]`, JSON.stringify(existing, null, 2));
+    console.log(`📌 [CURRENT STATUS] ${existing.status}`);
 
     // 2. Perform the update
     console.log(`✍️ [PERFORMING UPDATE] Applying updates...`);
@@ -201,89 +201,21 @@ exports.updateNegotiation = async (req, res) => {
       { new: true, runValidators: true }
     );
 
+    if (!updated) {
+      console.error(`❌ [UPDATE FAILED] findByIdAndUpdate returned null`);
+      return res.status(500).json({ success: false, message: "Update failed" });
+    }
+
     console.log("✅ [NEGOTIATION UPDATED SUCCESSFULLY]");
     console.log("📊 [UPDATED DOCUMENT]", JSON.stringify(updated, null, 2));
+    console.log(`📌 [NEW STATUS] ${updated.status}`);
 
-    // 3. Status Sync Logic
+    // 3. Status Sync Logic (Only if status actually changed)
     if (updated.status && updated.status !== existing.status) {
       console.log(
         `🔄 [STATUS CHANGE DETECTED] Old: ${existing.status} → New: ${updated.status}`
       );
-
-      let serviceModel;
-      let serviceIdField = "service";
-      let serviceType = updated.serviceType;
-
-      console.log(`📋 [SERVICE TYPE] Processing serviceType: ${serviceType}`);
-
-      switch (serviceType) {
-        case "offer_a_ride":
-          serviceModel = RideOffer;
-          serviceIdField = "service";
-          console.log(`🚗 [RIDE OFFER] Will sync with RideOffer model`);
-          break;
-
-        case "join_a_ride":
-          serviceModel = JoinRide;
-          serviceIdField = "negotiatorService";
-          console.log(
-            `👥 [JOIN RIDE] Will sync with JoinRide model using negotiatorService`
-          );
-          break;
-
-        case "deliver_a_parcel":
-          console.log(`📦 [PARCEL] Checking which parcel model to use...`);
-          if (updated.service) {
-            serviceModel = Parcel_Request;
-            serviceIdField = "service";
-            console.log(`📋 Using Parcel_Request via 'service' field`);
-          } else if (updated.negotiatorService) {
-            serviceModel = Parcel;
-            serviceIdField = "negotiatorService";
-            console.log(`📋 Using Parcel via 'negotiatorService' field`);
-          } else {
-            console.log(
-              `⚠️ [PARCEL] No service or negotiatorService ID found for sync`
-            );
-          }
-          break;
-
-        default:
-          console.warn(
-            `⚠️ [UNKNOWN SERVICE TYPE] ${serviceType} - No status sync will be performed`
-          );
-      }
-
-      if (serviceModel && updated[serviceIdField]) {
-        const serviceId = updated[serviceIdField];
-        console.log(
-          `🔗 [SYNCING STATUS] Updating service ${serviceIdField}: ${serviceId} to status: ${updated.status}`
-        );
-
-        const serviceUpdateResult = await serviceModel.findByIdAndUpdate(
-          serviceId,
-          { status: updated.status },
-          { new: true }
-        );
-
-        if (serviceUpdateResult) {
-          console.log(
-            `✅ [SERVICE STATUS SYNCED SUCCESSFULLY] ${serviceType} status updated to ${updated.status}`
-          );
-          console.log(
-            `📊 [UPDATED SERVICE]`,
-            JSON.stringify(serviceUpdateResult, null, 2)
-          );
-        } else {
-          console.warn(
-            `❌ [SERVICE SYNC FAILED] Service with ID ${serviceId} not found`
-          );
-        }
-      } else {
-        console.log(
-          `⚠️ [NO SYNC PERFORMED] Missing serviceModel or service ID`
-        );
-      }
+      await syncServiceStatus(updated);
     } else {
       console.log(`ℹ️ [NO STATUS CHANGE] Status remains: ${updated.status}`);
     }
@@ -293,11 +225,12 @@ exports.updateNegotiation = async (req, res) => {
 
     const actingUser = req.user ? req.user.toString() : null;
     const recipientId =
-      actingUser === updated.negotiator.toString()
+      actingUser === updated.negotiator?.toString()
         ? updated.serviceProvider
         : updated.negotiator;
 
-    console.log(`📨 [NOTIFICATION] Sending to recipient: ${recipientId}`);
+    console.log(`📨 [NOTIFICATION] Acting user: ${actingUser}`);
+    console.log(`📨 [NOTIFICATION] Recipient: ${recipientId}`);
 
     await sendNotification(recipientId, {
       title: "Negotiation Updated",
@@ -321,7 +254,6 @@ exports.updateNegotiation = async (req, res) => {
 
     console.log(`✅ [NOTIFICATION SENT] Successfully triggered notification`);
 
-    // Final Response
     console.log(
       `🎉 [UPDATE NEGOTIATION COMPLETED SUCCESSFULLY] ID: ${negotiationId}`
     );
@@ -334,25 +266,31 @@ exports.updateNegotiation = async (req, res) => {
   }
 };
 
-// Get all negotiations for the logged-in user (using token ID)
+// Get all negotiations for the logged-in user
 exports.getUserNegotiations = async (req, res) => {
   try {
-    // req.user is provided by your protect middleware
     const userId = req.user;
+
+    console.log(`🔍 [GET USER NEGOTIATIONS] Fetching for user: ${userId}`);
 
     const negotiations = await Negotiation.find({
       $or: [{ negotiator: userId }, { serviceProvider: userId }],
     })
-      .sort({ createdAt: -1 }) // Most recent first
-      .populate("negotiator", "name email phone") // Fetches from User Schema
-      .populate("serviceProvider", "name email phone"); // Fetches from User Schema
+      .sort({ createdAt: -1 })
+      .populate("negotiator", "fullName email phone profileImage")
+      .populate("serviceProvider", "fullName email phone profileImage");
 
+    console.log(
+      `✅ [GET USER NEGOTIATIONS SUCCESS] Found ${negotiations.length} negotiations`
+    );
     res.status(200).json(negotiations);
   } catch (err) {
+    console.error("❌ [GET USER NEGOTIATIONS ERROR]", err.message);
     res.status(400).json({ error: err.message });
   }
 };
 
+// Get single negotiation with full service data
 exports.getNegotiationById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -380,15 +318,14 @@ exports.getNegotiationById = async (req, res) => {
     let negotiatorServiceData = null;
     let serviceDetails = null;
     let pickupCode = negotiation.pickupCode;
-    let shouldDeleteNegotiation = false;
-
-    console.log(`📦 Resolving serviceType: ${negotiation.serviceType}`);
 
     const isValidObjectId = (value) => {
       return (
         mongoose.Types.ObjectId.isValid(value) && String(value).length === 24
       );
     };
+
+    console.log(`📦 Resolving serviceType: ${negotiation.serviceType}`);
 
     switch (negotiation.serviceType) {
       case "deliver_a_parcel":
@@ -408,15 +345,10 @@ exports.getNegotiationById = async (req, res) => {
           ).lean();
           console.log("📦 Parcel_Request fetched:", !!serviceDetails);
         }
-
-        if (!pickupCode && negotiatorServiceData?.parties?.sender?.pickupCode) {
-          pickupCode = negotiatorServiceData.parties.sender.pickupCode;
-        }
         break;
 
       case "join_a_ride":
       case "offer_a_ride":
-        // JoinRide from negotiatorService
         if (
           negotiation.negotiatorService &&
           isValidObjectId(negotiation.negotiatorService)
@@ -425,10 +357,8 @@ exports.getNegotiationById = async (req, res) => {
             negotiation.negotiatorService
           ).lean();
           console.log("📦 JoinRide fetched:", !!negotiatorServiceData);
-          if (!pickupCode) pickupCode = negotiatorServiceData?.pickupCode;
         }
 
-        // RideOffer from service
         if (negotiation.service && isValidObjectId(negotiation.service)) {
           serviceDetails = await RideOffer.findById(negotiation.service).lean();
           console.log("📦 RideOffer fetched:", !!serviceDetails);
@@ -439,7 +369,7 @@ exports.getNegotiationById = async (req, res) => {
         console.warn(`⚠️ Unknown serviceType: ${negotiation.serviceType}`);
     }
 
-    // ==================== AUTO DELETE INVALID NEGOTIATION ====================
+    // Auto delete invalid negotiation
     if (
       (negotiation.serviceType === "deliver_a_parcel" &&
         !negotiatorServiceData) ||
@@ -448,16 +378,18 @@ exports.getNegotiationById = async (req, res) => {
         !negotiatorServiceData &&
         !serviceDetails)
     ) {
-      console.log(
-        "🗑️ Invalid negotiation detected (service data missing). Deleting..."
-      );
+      console.log("🗑️ Invalid negotiation detected. Deleting...");
       await Negotiation.findByIdAndDelete(id);
-      return res.status(404).json({
-        error: "Negotiation was invalid and has been removed.",
-      });
+      return res
+        .status(404)
+        .json({ error: "Negotiation was invalid and has been removed." });
     }
 
-    // ==================== PICKUP CODE FALLBACK ====================
+    // Pickup Code Fallback
+    if (!pickupCode && negotiatorServiceData?.parties?.sender?.pickupCode) {
+      pickupCode = negotiatorServiceData.parties.sender.pickupCode;
+    }
+
     if (!pickupCode) {
       console.log("⚠️ No pickupCode found - Generating fallback...");
       const senderName =
@@ -483,10 +415,10 @@ exports.getNegotiationById = async (req, res) => {
       isParcel,
     };
 
-    console.log("🚀 Final response prepared");
+    console.log("🚀 Final response prepared successfully");
     res.status(200).json(finalResponse);
   } catch (err) {
-    console.error("❌ Error in getNegotiationById:", err);
+    console.error("❌ Error in getNegotiationById:", err.message);
     res.status(500).json({ error: err.message });
   }
 };

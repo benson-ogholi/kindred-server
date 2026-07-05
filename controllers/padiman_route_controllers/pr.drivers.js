@@ -129,7 +129,7 @@ exports.getDriverApplicationStatus = async (req, res) => {
 
     if (!application) {
       return res
-        .status(404)
+        .status(200)
         .json({ message: "No application found for this user." });
     }
 
