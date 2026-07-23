@@ -1,15 +1,19 @@
-// controllers/paymentController.js
-
 const axios = require("axios");
 const Negotiation = require("../../models/padiman_route_models/Negotiation");
 const Payment = require("../../models/padiman_route_models/Payment");
-const { sendNotification } = require("../../utils/pr/pr_push");
-const Wallet = require("../../models/padiman_route_models/Wallet");
+const Request = require("../../models/padiman_route_models/Request");
 const Padiman_Route_User = require("../../models/padiman_route_models/Padiman_Route_User");
+const { sendNotification } = require("../../utils/pr/pr_push");
+
+// ✅ FIX: Safely extract the Wallet model depending on how the new schema exports it
+const WalletModule = require("../../models/padiman_route_models/Wallet");
+const Wallet = WalletModule.Wallet || WalletModule.default || WalletModule;
 
 const PAYSTACK_SECRET_KEY = "sk_test_14dce601e7eb9845ed6fcf46fd67e7c27e8070a8";
 
-// 1. Initialize Paystack Transaction
+// =============================================================================
+// 1. INITIALIZE PAYSTACK TRANSACTION
+// =============================================================================
 exports.initializePayment = async (req, res) => {
   console.log("==================================================");
   console.log("🚀 [INITIALIZE_PAYMENT] Request received");
@@ -35,7 +39,13 @@ exports.initializePayment = async (req, res) => {
       return res.status(404).json({ message: "Negotiation record missing" });
     }
 
-    const agreedAmount = negotiation.agreedAmount || req.body.amount || 5000;
+    // Updated to reflect new Negotiation Schema ('price' field instead of 'agreedAmount')
+    const agreedAmount = negotiation.price || req.body.amount || 5000;
+    const resolvedServiceType =
+      negotiation.serviceType ||
+      negotiation.negotiatorServiceType ||
+      serviceType;
+
     const paystackAmount = agreedAmount * 100;
     const reference = `TX-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
@@ -43,7 +53,11 @@ exports.initializePayment = async (req, res) => {
       email,
       amount: paystackAmount,
       reference,
-      metadata: { negotiationId, serviceType, userId },
+      metadata: {
+        negotiationId,
+        serviceType: resolvedServiceType,
+        userId,
+      },
     };
 
     const response = await axios.post(
@@ -58,14 +72,14 @@ exports.initializePayment = async (req, res) => {
     );
 
     if (response.data.status) {
-      // const newPayment = await Payment.create({
-      //   negotiationId,
-      //   userId,
-      //   amount: agreedAmount,
-      //   reference,
-      //   serviceType,
-      //   status: "pending",
-      // });
+      // Un-commented & saved pending record into Payment collection
+      await Payment.create({
+        negotiationId,
+        userId,
+        amount: agreedAmount,
+        reference,
+        status: "pending",
+      });
 
       console.log("✅ [DB_RECORD_SAVED] Payment pending tracking logged.");
 
@@ -99,6 +113,10 @@ exports.initializePayment = async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 };
+
+// =============================================================================
+// 2. VERIFY PAYSTACK TRANSACTION
+// =============================================================================
 exports.verifyPayment = async (req, res) => {
   console.log("==================================================");
   console.log("🔍 [VERIFY_PAYMENT] Route reached");
@@ -122,28 +140,32 @@ exports.verifyPayment = async (req, res) => {
     );
 
     const paystackData = response.data?.data;
-    const { negotiationId } = paystackData.metadata || {};
+    const { negotiationId, userId: metadataUserId } =
+      paystackData.metadata || {};
 
     if (paystackData.status === "success") {
-      // Update Payment Record
+      // 1. Update Payment Record (uses upsert to guarantee write if initialize missing)
       const updatedPayment = await Payment.findOneAndUpdate(
         { reference },
         { status: "success", paystackRawResponse: paystackData },
-        { new: true }
+        { new: true, upsert: true }
       );
 
-      // Update Negotiation Record
-      const updatedNegotiation = await Negotiation.findByIdAndUpdate(
-        negotiationId,
-        { status: "ride agreed", isPaid: true },
-        { new: true }
-      );
+      // 2. Fetch and update Negotiation record to mark as paid
+      let negotiation = null;
+      if (negotiationId) {
+        negotiation = await Negotiation.findByIdAndUpdate(
+          negotiationId,
+          { isPaid: true },
+          { new: true }
+        );
+      }
 
-      // TARGET RE-ROUTED: Credit the serviceProvider, not the negotiator/customer
-      const targetUserId = updatedNegotiation?.serviceProvider;
-      const amountCredited = paystackData.amount / 100; // Paystack converts Naira to Kobo values
+      // TARGET: Credit the serviceProvider defined in NegotiationSchema
+      const targetUserId = negotiation?.serviceProvider;
+      const amountCredited = paystackData.amount / 100; // Convert Kobo to Naira
 
-      // Extract details cleanly for reuse across Wallet save and Push notification hooks
+      // Extract details cleanly
       const customerInfo = paystackData.customer || {};
       const payerEmailStr = customerInfo.email || "unknown@paystack.com";
 
@@ -160,23 +182,106 @@ exports.verifyPayment = async (req, res) => {
         });
         if (dbUser && dbUser.fullName) {
           payerNameStr = dbUser.fullName;
-          console.log(
-            `🎯 Payer profile matched via database lookup email trace: ${payerNameStr}`
-          );
         }
       }
 
       const timeOfPayment = paystackData.paid_at || new Date().toISOString();
-      const resolvedServiceId = updatedNegotiation?.service || null;
+
+      // Adapted to support both service/negotiatorService references from new schema
+      const resolvedServiceId =
+        negotiation?.service || negotiation?.negotiatorService || null;
       const resolvedServiceType =
-        updatedNegotiation?.serviceType || "ride_revenue_received";
+        negotiation?.serviceType ||
+        negotiation?.negotiatorServiceType ||
+        "ride_revenue_received";
+
+      // 3. Find and update both Request documents associated with the negotiation
+      let updatedRequest = null;
+      let updatedNegotiatorRequest = null;
+
+      if (negotiation) {
+        const serviceRequestId = negotiation.service
+          ? negotiation.service.toString()
+          : null;
+        const negotiatorRequestId = negotiation.negotiatorService
+          ? negotiation.negotiatorService.toString()
+          : null;
+
+        const commonUpdateData = {
+          isPaid: true,
+          status: "assigned",
+          inRideWith: negotiatorRequestId,
+          assignedTo: serviceRequestId,
+          agreedPrice:
+            negotiation.price ||
+            negotiation.agreedPrice ||
+            negotiation.amount ||
+            amountCredited,
+          finalPrice: amountCredited,
+        };
+
+        // Update the primary request (e.g., service request)
+        if (serviceRequestId) {
+          updatedRequest = await Request.findByIdAndUpdate(
+            serviceRequestId,
+            commonUpdateData,
+            { new: true }
+          );
+        }
+
+        // Alternatively check negotiation reference if serviceRequestId wasn't found directly
+        if (!updatedRequest) {
+          updatedRequest = await Request.findOneAndUpdate(
+            { negotiation: negotiation._id },
+            commonUpdateData,
+            { new: true }
+          );
+        }
+
+        // Update the second request (negotiatorService request) if it exists separately
+        if (negotiatorRequestId && negotiatorRequestId !== serviceRequestId) {
+          updatedNegotiatorRequest = await Request.findByIdAndUpdate(
+            negotiatorRequestId,
+            commonUpdateData,
+            { new: true }
+          );
+        }
+
+        const targetRequestId =
+          updatedRequest?._id || updatedNegotiatorRequest?._id;
+
+        if (targetRequestId) {
+          console.log(
+            `✅ Request(s) successfully marked as paid and status updated to confirmed.`
+          );
+
+          if (targetUserId) {
+            const requestIdsToUpdate = [
+              serviceRequestId,
+              negotiatorRequestId,
+            ].filter(Boolean);
+            if (requestIdsToUpdate.length > 0) {
+              await Request.updateMany(
+                {
+                  _id: { $in: requestIdsToUpdate },
+                  "serviceProviders.providerId": targetUserId,
+                },
+                { $set: { "serviceProviders.$.status": "accepted" } }
+              );
+            }
+          }
+        } else {
+          console.log(
+            `⚠️ No matching Requests found for negotiation ${negotiation._id} to assign.`
+          );
+        }
+      }
 
       if (targetUserId) {
         console.log(
           `📡 Process Wallet sync for Service Provider User ID: ${targetUserId}`
         );
 
-        // Fetch or initialize the destination wallet structure dynamically
         let wallet = await Wallet.findOne({ user: targetUserId });
         if (!wallet) {
           console.log(
@@ -185,22 +290,22 @@ exports.verifyPayment = async (req, res) => {
           wallet = new Wallet({
             user: targetUserId,
             balance: 0,
+            withdrawableBalance: 0,
             earnings: [],
             withdrawals: [],
           });
         }
 
-        // Idempotency Check: Guard against duplicate calls crediting accounts twice
+        // Idempotency Check
         const alreadyCredited = wallet.earnings.some(
           (earning) => earning.reference === reference
         );
 
         if (!alreadyCredited) {
           console.log(
-            `💰 Crediting ₦${amountCredited} as PENDING earning to service provider...`
+            `💰 Crediting ₦${amountCredited} as SUCCESS earning to service provider...`
           );
 
-          // NOTE: wallet.balance += amountCredited; is skipped here because earnings are pending escrow!
           wallet.earnings.push({
             payment: updatedPayment?._id || null,
             negotiationId: negotiationId || null,
@@ -210,17 +315,20 @@ exports.verifyPayment = async (req, res) => {
             amount: amountCredited,
             reference: reference,
             source: resolvedServiceType,
-            status: "pending", // Logged explicitly as pending status
+            status: "success",
             createdAt: new Date(timeOfPayment),
           });
 
+          wallet.balance += amountCredited;
+          wallet.withdrawableBalance += amountCredited;
+
           await wallet.save();
           console.log(
-            `✅ Wallet pending transaction logged successfully. Available Balance remains: ₦${wallet.balance}`
+            `✅ Wallet transaction successfully logged and balance updated. Balance: ₦${wallet.balance}`
           );
         } else {
           console.log(
-            `⚠️ Reference "${reference}" has already been processed into earnings. Skipping ledger alteration.`
+            `⚠️ Reference "${reference}" has already been processed into earnings.`
           );
         }
       } else {
@@ -229,54 +337,58 @@ exports.verifyPayment = async (req, res) => {
         );
       }
 
-      // ====================== SEND SUCCESS NOTIFICATION ======================
+      // Send Success Notification to Service Provider
       await sendNotification(targetUserId, {
-        title: "Payment Successful! 🎉",
-        body: `Your payment of ₦${amountCredited} from ${payerNameStr} has been confirmed. It is currently held as pending.`,
+        title: "Payment Successful & Ride Confirmed! 🎉",
+        body: `Payment of ₦${amountCredited} from ${payerNameStr} confirmed. Request has been confirmed.`,
         type: "PAYMENT",
         router: "/(screens)/success",
         data: {
           reference,
           negotiationId,
+          requestId: updatedRequest ? updatedRequest._id.toString() : null,
           serviceId: resolvedServiceId ? resolvedServiceId.toString() : null,
           serviceType: resolvedServiceType,
           payerName: payerNameStr,
           payerEmail: payerEmailStr,
           timeOfPayment: timeOfPayment,
           amount: amountCredited,
-          status: "pending",
+          status: "success",
         },
       });
-      // =====================================================================
 
       console.log(
-        "✅ Payment verified, pending earnings saved to wallet, and notifications sent."
+        "✅ Payment verified, negotiation updated, requests confirmed, wallet logged, and notifications sent."
       );
       return res.status(200).json({
         success: true,
-        message: "Payment captured successfully and wallet logged as pending.",
-        data: paystackData,
-      });
-    } else {
-      // ====================== SEND FAILED NOTIFICATION ======================
-      await Payment.findOneAndUpdate(
-        { reference },
-        { status: "failed", paystackRawResponse: paystackData }
-      );
-
-      await sendNotification(metadataUserId, {
-        title: "Payment Failed",
-        body: `Your payment could not be completed. Reason: ${
-          paystackData.gateway_response || "Transaction declined"
-        }.`,
-        type: "PAYMENT",
-        router: "/(screens)/payment-failed",
+        message:
+          "Payment captured, request schemas confirmed, and wallet successfully credited.",
         data: {
-          reference,
-          status: "failed",
+          paystackData,
+          request: updatedRequest,
+          negotiatorRequest: updatedNegotiatorRequest,
         },
       });
-      // =====================================================================
+    } else {
+      // Payment Failed
+      await Payment.findOneAndUpdate(
+        { reference },
+        { status: "failed", paystackRawResponse: paystackData },
+        { upsert: true }
+      );
+
+      if (metadataUserId) {
+        await sendNotification(metadataUserId, {
+          title: "Payment Failed",
+          body: `Your payment could not be completed. Reason: ${
+            paystackData.gateway_response || "Transaction declined"
+          }.`,
+          type: "PAYMENT",
+          router: "/(screens)/payment-failed",
+          data: { reference, status: "failed" },
+        });
+      }
 
       return res.status(400).json({
         success: false,
@@ -305,45 +417,30 @@ exports.verifyPayment = async (req, res) => {
   }
 };
 
+// =============================================================================
+// 3. RELEASE ESCROW EARNINGS
+// =============================================================================
 exports.releaseEscrowEarnings = async (req, res) => {
   console.log("==================================================");
   console.log(
     `🚀 [RELEASE_ESCROW_EARNINGS] Triggered for Negotiation ID: ${req.params.negotiationId}`
-  );
-  console.log(`📥 [INCOMING_PARAMS]:`, JSON.stringify(req.params, null, 2));
-  console.log(`📥 [INCOMING_BODY]:`, JSON.stringify(req.body, null, 2));
-  console.log(
-    `📥 [AUTHENTICATED_USER_CONTEXT]:`,
-    req.user
-      ? JSON.stringify(req.user, null, 2)
-      : "No authenticated user injected on request"
   );
 
   try {
     const { negotiationId } = req.params;
 
     if (!negotiationId) {
-      console.warn(
-        "❌ [VALIDATION_FAILURE]: negotiationId parameter is completely missing from incoming request path."
-      );
       return res.status(400).json({
         success: false,
         message: "Negotiation reference identifier parameter missing.",
       });
     }
 
-    console.log(
-      `🔍 [DB_QUERY]: Attempting to locate Wallet document holding negotiationId: ${negotiationId} in earnings array...`
-    );
-    // Locate the specific wallet containing this pending item matching the negotiation record
     const wallet = await Wallet.findOne({
       "earnings.negotiationId": negotiationId,
     });
 
     if (!wallet) {
-      console.warn(
-        `❌ [NOT_FOUND_FAILURE]: No wallet document matches the negotiation reference: ${negotiationId}`
-      );
       return res.status(404).json({
         success: false,
         message:
@@ -351,28 +448,13 @@ exports.releaseEscrowEarnings = async (req, res) => {
       });
     }
 
-    console.log(
-      `📋 [WALLET_MATCHED]: Wallet ID found: ${wallet._id} for User Reference: ${wallet.user}`
-    );
-    console.log(
-      `📊 [CURRENT_WALLET_STATE]: Balance: ₦${wallet.balance} | WithdrawableBalance: ₦${wallet.withdrawableBalance}`
-    );
-
-    // Find the specific structural nested earnings sub-document index
     const earningIndex = wallet.earnings.findIndex(
       (earning) =>
         earning.negotiationId &&
         earning.negotiationId.toString() === negotiationId
     );
 
-    console.log(
-      `🎯 [ARRAY_INDEX_MATCHED]: Nested index for target target earning within array is: ${earningIndex}`
-    );
-
     if (earningIndex === -1) {
-      console.error(
-        `❌ [LOGICAL_CRITICAL_ERROR]: The top-level query matched this wallet, but sub-document findIndex could not pinpoint negotiationId: ${negotiationId} in array.`
-      );
       return res.status(500).json({
         success: false,
         message:
@@ -381,29 +463,8 @@ exports.releaseEscrowEarnings = async (req, res) => {
     }
 
     const targetEarning = wallet.earnings[earningIndex];
-    console.log(
-      `📦 [TARGET_EARNING_DATA]:`,
-      JSON.stringify(targetEarning, null, 2)
-    );
-
-    // Idempotency check: Guard if the status is already updated or not pending
-    // if (targetEarning.status === "success") {
-    //   console.log(
-    //     `⚠️ [IDEMPOTENCY_BLOCK]: Escrow transaction was already executed successfully in a previous loop. Exiting safely.`
-    //   );
-    //   return res.status(200).json({
-    //     success: true,
-    //     message:
-    //       "Escrow clearing redundant. This transaction item is already released and cleared.",
-    //     balance: wallet.balance,
-    //     withdrawableBalance: wallet.withdrawableBalance || wallet.balance,
-    //   });
-    // }
 
     if (targetEarning.status === "failed") {
-      console.warn(
-        `❌ [STATE_MUTATION_GUARD]: Target ledger line status is flagged as 'failed'. Escrow release aborted.`
-      );
       return res.status(400).json({
         success: false,
         message:
@@ -411,75 +472,24 @@ exports.releaseEscrowEarnings = async (req, res) => {
       });
     }
 
-    console.log(
-      `🔄 [MUTATION_START]: Upgrading state status from '${targetEarning.status}' to 'success'`
-    );
-    // Execute safe operations: transition status and credit balances
+    // Transition earning state to success
     targetEarning.status = "success";
 
-    console.log(
-      `💸 [MATH_OP]: Adding ₦${targetEarning.amount} to primary balance ledger...`
-    );
-    // Credit standard tracking balance
+    // Credit balances
     wallet.balance += targetEarning.amount;
 
-    // Credit operational withdrawable balance tracking matrix safely
     if (typeof wallet.withdrawableBalance !== "number") {
-      console.log(
-        `🔧 [TYPE_FIX]: wallet.withdrawableBalance was not a valid number primitive type. Standardizing to 0.`
-      );
       wallet.withdrawableBalance = 0;
     }
-
-    console.log(
-      `💸 [MATH_OP]: Adding ₦${targetEarning.amount} to withdrawable safe balance ledger...`
-    );
     wallet.withdrawableBalance += targetEarning.amount;
 
-    console.log(
-      `💾 [DB_SAVE]: Writing modified balance updates to Mongo storage engine...`
-    );
-    // Persist wallet balance updates down into MongoDB
     await wallet.save();
-    console.log(
-      `✅ [ESCROW_RELEASED] ₦${targetEarning.amount} credited to user: ${wallet.user}. New Spendable: ₦${wallet.balance} | Withdrawable: ₦${wallet.withdrawableBalance}`
-    );
 
-    // ====================================================================
-    // INTEGRATED: Toggle negotiation confirmation status state parameters
-    // ====================================================================
-    let updatedNegotiation = null;
-    try {
-      console.log(
-        `🔄 [DB_UPDATE]: Triggering negotiation collection update for document target ID: ${negotiationId}...`
-      );
-      updatedNegotiation = await Negotiation.findByIdAndUpdate(
-        negotiationId,
-        { $set: { isConfirmed: true } },
-        { new: true }
-      );
-      console.log(
-        `🔒 [NEGOTIATION_CONFIRMED] isConfirmed status verified set to true for ID: ${negotiationId}`
-      );
-      console.log(
-        `📄 [UPDATED_NEGOTIATION_PAYLOAD]:`,
-        JSON.stringify(updatedNegotiation, null, 2)
-      );
-    } catch (negErr) {
-      console.error(
-        `⚠️ Failed to update negotiation isConfirmed flag parameters downstream:`,
-        negErr.message,
-        "\nStack trace:",
-        negErr.stack
-      );
-    }
-    // ====================================================================
+    // Fetch negotiation details
+    const negotiation = await Negotiation.findById(negotiationId);
 
-    // Optionally dispatch background alerts to the Service Provider notifying them of unlocked funds
+    // Push notification to user
     try {
-      console.log(
-        `📱 [NOTIFICATION_DISPATCH]: Compiling background socket payload push alert targeting recipient User ID: ${wallet.user.toString()}...`
-      );
       await sendNotification(wallet.user.toString(), {
         title: "Funds Cleared! 💰",
         body: `₦${targetEarning.amount.toLocaleString()} has been moved from escrow to your spendable available balance.`,
@@ -491,22 +501,12 @@ exports.releaseEscrowEarnings = async (req, res) => {
           status: "success",
         },
       });
-      console.log(
-        `🚀 [NOTIFICATION_SUCCESS]: Notification packet dispatched completely to notification servers.`
-      );
     } catch (notifErr) {
       console.error(
-        "⚠️ Push notification failed to send post escrow clear:",
-        notifErr.message,
-        "\nStack trace:",
-        notifErr.stack
+        "⚠️ Push notification failed post-escrow release:",
+        notifErr.message
       );
     }
-
-    console.log(
-      `🏁 [RESPONSE_200]: Escrow release thread execution process finalized successfully.`
-    );
-    console.log("==================================================");
 
     return res.status(200).json({
       success: true,
@@ -517,16 +517,11 @@ exports.releaseEscrowEarnings = async (req, res) => {
         amountReleased: targetEarning.amount,
         newSpendableBalance: wallet.balance,
         newWithdrawableBalance: wallet.withdrawableBalance,
-        negotiation: updatedNegotiation,
+        negotiation,
       },
     });
   } catch (error) {
-    console.error(
-      "❌ [RELEASE_ESCROW_ERROR] Fatal processing exception encountered inside route controller logic:",
-      error.message
-    );
-    console.error("💥 [FULL_ERROR_STACK]:", error.stack);
-    console.log("==================================================");
+    console.error("❌ [RELEASE_ESCROW_ERROR]:", error.message);
     return res.status(500).json({ success: false, error: error.message });
   }
 };

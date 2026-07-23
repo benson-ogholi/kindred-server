@@ -3,11 +3,13 @@ const AdminCommission = require("../../models/padiman_route_models/AdminCommissi
 const DriverApplication = require("../../models/padiman_route_models/DriverApplication");
 const Negotiation = require("../../models/padiman_route_models/Negotiation");
 const Padiman_Route_User = require("../../models/padiman_route_models/Padiman_Route_User");
-const Parcel = require("../../models/padiman_route_models/Parcel");
-const Parcel_Request = require("../../models/padiman_route_models/Parcel_Request");
 const Payment = require("../../models/padiman_route_models/Payment");
-const RideOffer = require("../../models/padiman_route_models/RideOffer");
-const Wallet = require("../../models/padiman_route_models/Wallet");
+const { Wallet } = require("../../models/padiman_route_models/Wallet");
+// The unified Request model backs every join-ride, offer-ride,
+// send-package, and deliver-package flow (see ChatScreen / wallet
+// controller — escrow release keys off Request.status). Parcel,
+// Parcel_Request, and RideOffer are retired.
+const Request = require("../../models/padiman_route_models/Request");
 
 // ==========================================
 // 1. GET ALL OPERATIONS (With Pagination)
@@ -37,79 +39,68 @@ exports.getAllUsers = async (req, res) => {
   }
 };
 
-// @desc    Get all parcel requests
-// @route   GET /api/admin/parcel-requests
-exports.getAllParcelRequests = async (req, res) => {
+// @desc    Get all requests (modern unified model — join-ride, offer-ride,
+//          send-package, deliver-package). Supports optional ?type= and
+//          ?status= filters so the admin UI can slice by request type or
+//          lifecycle stage (pending/assigned/in_progress/completed/
+//          confirmed/cancelled/expired).
+// @route   GET /api/admin/requests
+exports.getAllRequests = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    const parcelRequests = await Parcel_Request.find()
-      .populate("user", "fullName email phone profileImage")
-      .populate("negotiations")
+    const filter = {};
+    if (req.query.type) filter.type = req.query.type;
+    if (req.query.status) filter.status = req.query.status;
+
+    const requests = await Request.find(filter)
+      .populate("userId", "fullName email phone profileImage")
+      .populate("negotiation")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit);
 
-    const total = await Parcel_Request.countDocuments();
+    const total = await Request.countDocuments(filter);
 
     res.status(200).json({
       success: true,
-      count: parcelRequests.length,
+      count: requests.length,
       total,
       page,
-      data: parcelRequests,
+      data: requests,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// @desc    Get all parcels (created shipments)
-// @route   GET /api/admin/parcels
-exports.getAllParcels = async (req, res) => {
+// @desc    Get a single request with full detail — sender, negotiation,
+//          handover proof, rating. Useful for an admin drill-down/dispute
+//          resolution view.
+// @route   GET /api/admin/requests/:id
+exports.getRequestById = async (req, res) => {
   try {
-    // 1. Log incoming query parameters
-    console.log("Query Parameters:", req.query);
+    const { id } = req.params;
 
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
+    const request = await Request.findById(id)
+      .populate("userId", "fullName email phone profileImage")
+      .populate("negotiation")
+      .populate("rating.ratedBy", "fullName email");
 
-    // 2. Log pagination logic
-    console.log(`Pagination: page=${page}, limit=${limit}, skip=${skip}`);
+    if (!request) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Request not found." });
+    }
 
-    const parcels = await Parcel.find()
-      .populate("requestedBy", "fullName email phone")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-
-    const total = await Parcel.countDocuments();
-
-    // 3. Log results summary
-    console.log(
-      `Successfully fetched ${parcels.length} parcels. Total in DB: ${total}`
-    );
-
-    res.status(200).json({
-      success: true,
-      count: parcels.length,
-      total,
-      page,
-      data: parcels,
-    });
+    res.status(200).json({ success: true, data: request });
   } catch (error) {
-    // 4. Log detailed error for debugging
-    console.error("Error in getAllParcels:", error);
-
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
+
 // @desc    Get all payments
 // @route   GET /api/admin/payments
 exports.getAllPayments = async (req, res) => {
@@ -133,35 +124,6 @@ exports.getAllPayments = async (req, res) => {
       total,
       page,
       data: payments,
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// @desc    Get all ride offers
-// @route   GET /api/admin/ride-offers
-exports.getAllRideOffers = async (req, res) => {
-  try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
-
-    const rideOffers = await RideOffer.find()
-      .populate("driver", "fullName email phone profileImage")
-      .populate("negotiations")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-
-    const total = await RideOffer.countDocuments();
-
-    res.status(200).json({
-      success: true,
-      count: rideOffers.length,
-      total,
-      page,
-      data: rideOffers,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -414,7 +376,6 @@ exports.getAllAdminCommissions = async (req, res) => {
 // @desc    Approve or Reject a specific withdrawal item
 // @route   PUT /api/admin/withdrawals/:id/status
 // @access  Private (Admin Only)
-// @access  Private (Admin Only)
 exports.updateWithdrawalStatus = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -474,7 +435,7 @@ exports.updateWithdrawalStatus = async (req, res) => {
     withdrawalItem.status = status;
     await wallet.save({ session });
 
-    // --- NEW: If successful, write the 15% log record to AdminCommission ---
+    // --- If successful, write the 15% log record to AdminCommission ---
     let commissionLog = null;
     if (status === "success") {
       // The pre('validate') hook on AdminCommission model automatically handles the 15% math calculation
@@ -491,7 +452,7 @@ exports.updateWithdrawalStatus = async (req, res) => {
       );
       commissionLog = createdCommissions[0];
     }
-    // ----------------------------------------------------------------------
+    // --------------------------------------------------------------------
 
     // Finalize all operations inside the transaction safely
     await session.commitTransaction();
@@ -512,6 +473,7 @@ exports.updateWithdrawalStatus = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 // @desc    Get dynamic metrics, time-series graphs, and cross-domain comparisons
 // @route   GET /api/admin/dashboard-statistics
 // @access  Private (Admin Only)
@@ -524,19 +486,39 @@ exports.getAdminDashboardStats = async (req, res) => {
       totalUsers,
       totalDrivers,
       pendingDrivers,
-      totalParcelRequests,
-      activeShipments,
-      totalRideOffers,
       totalNegotiations,
+      // --- Unified Request model counters (single source of truth for
+      // join-ride, offer-ride, send-package, deliver-package — legacy
+      // Parcel / Parcel_Request / RideOffer counts are gone) ---
+      totalRequests,
+      activeRequestsInProgress,
+      requestsByTypeAgg,
+      requestsByStatusAgg,
     ] = await Promise.all([
       Padiman_Route_User.countDocuments(),
       Padiman_Route_User.countDocuments({ isDriver: true }),
       DriverApplication.countDocuments({ status: "pending" }),
-      Parcel_Request.countDocuments(),
-      Parcel.countDocuments({ status: { $ne: "delivered" } }), // Ongoing active transits
-      RideOffer.countDocuments(),
       Negotiation.countDocuments(),
+      Request.countDocuments(),
+      // "Active" means the ride/delivery is actually underway or assigned
+      // and waiting to start — matches ChatScreen's own requestStatus
+      // checks for "assigned" / "in_progress".
+      Request.countDocuments({ status: { $in: ["assigned", "in_progress"] } }),
+      Request.aggregate([{ $group: { _id: "$type", count: { $sum: 1 } } }]),
+      Request.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
     ]);
+
+    // Flatten the type/status aggregates into simple lookup objects for the
+    // response payload.
+    const requestsByType = requestsByTypeAgg.reduce((acc, item) => {
+      acc[item._id || "unknown"] = item.count;
+      return acc;
+    }, {});
+
+    const requestsByStatus = requestsByStatusAgg.reduce((acc, item) => {
+      acc[item._id || "unknown"] = item.count;
+      return acc;
+    }, {});
 
     // ---------------------------------------------------------
     // B. FINANCIAL LEDGER OVERVIEW
@@ -577,7 +559,12 @@ exports.getAdminDashboardStats = async (req, res) => {
       paymentCount: 0,
     };
 
-    // Unwind wallet collection to aggregate total assets & processed payouts
+    // Unwind wallet collection to aggregate total assets & processed payouts.
+    // --- MODERNIZATION: also break earnings down by status so admins can
+    // see how much driver money is still locked in escrow (earnings whose
+    // linked Request hasn't hit "confirmed" yet — see getWallet's
+    // auto-release logic) versus how much has actually cleared, plus the
+    // aggregate withdrawableBalance across all wallets.
     const escrowWalletStats = await Wallet.aggregate([
       {
         $facet: {
@@ -586,6 +573,7 @@ exports.getAdminDashboardStats = async (req, res) => {
               $group: {
                 _id: null,
                 totalDriverBalances: { $sum: "$balance" },
+                totalWithdrawableBalances: { $sum: "$withdrawableBalance" },
               },
             },
           ],
@@ -599,18 +587,38 @@ exports.getAdminDashboardStats = async (req, res) => {
               },
             },
           ],
+          earningsByStatus: [
+            { $unwind: "$earnings" },
+            {
+              $group: {
+                _id: "$earnings.status",
+                totalAmount: { $sum: "$earnings.amount" },
+                count: { $sum: 1 },
+              },
+            },
+          ],
         },
       },
     ]);
 
     const activeDriverEquity =
       escrowWalletStats[0]?.balances[0]?.totalDriverBalances || 0;
-    const payoutGroup = escrowWalletStats[0]?.payouts || [];
+    const totalWithdrawableBalances =
+      escrowWalletStats[0]?.balances[0]?.totalWithdrawableBalances || 0;
 
+    const payoutGroup = escrowWalletStats[0]?.payouts || [];
     const processedPayouts =
       payoutGroup.find((p) => p._id === "success")?.totalAmount || 0;
     const pendingPayouts =
       payoutGroup.find((p) => p._id === "pending")?.totalAmount || 0;
+
+    const earningsGroup = escrowWalletStats[0]?.earningsByStatus || [];
+    // Funds still sitting in escrow, waiting on the customer to confirm
+    // handover before they become withdrawable.
+    const escrowHeldEarnings =
+      earningsGroup.find((e) => e._id === "pending")?.totalAmount || 0;
+    const releasedEarnings =
+      earningsGroup.find((e) => e._id === "success")?.totalAmount || 0;
 
     // --- MONGOOSE COLLECTION QUERY: Read exact values from AdminCommission Schema ---
     const adminCommissionAgg = await AdminCommission.aggregate([
@@ -648,19 +656,7 @@ exports.getAdminDashboardStats = async (req, res) => {
     ]);
 
     // ---------------------------------------------------------
-    // D. GRAPH METRIC 2: Fulfillment Status Distributions
-    // ---------------------------------------------------------
-    const parcelStatusBreakdown = await Parcel.aggregate([
-      {
-        $group: {
-          _id: "$status",
-          count: { $sum: 1 },
-        },
-      },
-    ]);
-
-    // ---------------------------------------------------------
-    // E. COMPARISONS: Negotiation Match Rates
+    // D. COMPARISONS: Negotiation Match Rates
     // ---------------------------------------------------------
     const negotiationConversionRates = await Negotiation.aggregate([
       {
@@ -683,7 +679,7 @@ exports.getAdminDashboardStats = async (req, res) => {
         : 0;
 
     // ---------------------------------------------------------
-    // F. COMBINED INSIGHT RESPONSE DISPATCH
+    // E. COMBINED INSIGHT RESPONSE DISPATCH
     // ---------------------------------------------------------
     res.status(200).json({
       success: true,
@@ -693,10 +689,13 @@ exports.getAdminDashboardStats = async (req, res) => {
           users: totalUsers,
           activeDrivers: totalDrivers,
           pendingDriverApplications: pendingDrivers,
-          parcelRequests: totalParcelRequests,
-          activeShipmentsInTransit: activeShipments,
-          rideOffers: totalRideOffers,
           negotiations: totalNegotiations,
+          // --- Unified Request counters (single schema for every request
+          // type: join-ride, offer-ride, send-package, deliver-package) ---
+          totalRequests,
+          activeRequestsInProgress,
+          requestsByType,
+          requestsByStatus,
         },
         financialSummaries: {
           grossVolumeInvoiced: globalFinancials.grossVolume,
@@ -705,9 +704,13 @@ exports.getAdminDashboardStats = async (req, res) => {
           driverWalletBalancesEscrow: activeDriverEquity,
           successfulPayoutsSettled: processedPayouts,
           pendingPayoutsInQueue: pendingPayouts,
-          adminCommissionEarned: adminCommissionEarned, // Serving factual data verified directly from the schema tracking records
+          adminCommissionEarned: adminCommissionEarned,
           paymentBreakdownDistribution:
             revenueStats[0]?.paymentStatusDistribution || [],
+          // --- MODERNIZATION: escrow-aware wallet breakdown ---
+          totalWithdrawableBalances, // sum of wallet.withdrawableBalance across all drivers
+          escrowHeldEarnings, // earnings still locked pending Request confirmation
+          releasedEarnings, // earnings already cleared to balance
         },
         charts: {
           historicalThirtyDayRevenue: chronologicalTimeLines.map((item) => ({
@@ -715,8 +718,16 @@ exports.getAdminDashboardStats = async (req, res) => {
             revenue: item.revenue,
             volume: item.transactionsCount,
           })),
-          parcelDistributionPieChart: parcelStatusBreakdown.map((item) => ({
+          // Unified Request status/type breakdown — reflects
+          // pending/assigned/in_progress/completed/confirmed/cancelled/
+          // expired across every request type from the single Request
+          // schema (no more separate Parcel/RideOffer charts).
+          requestStatusPieChart: requestsByStatusAgg.map((item) => ({
             status: item._id || "unknown",
+            count: item.count,
+          })),
+          requestTypePieChart: requestsByTypeAgg.map((item) => ({
+            type: item._id || "unknown",
             count: item.count,
           })),
           negotiationComparisonMetrics: {

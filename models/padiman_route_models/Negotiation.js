@@ -1,32 +1,46 @@
 const mongoose = require('mongoose');
 
 const NegotiationSchema = new mongoose.Schema({
-  negotiator: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'PadimanRouteUser', 
-    required: true 
+  negotiator: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PadimanRouteUser',
+    required: true
   },
-  serviceProvider: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'PadimanRouteUser', 
-    required: true 
+  serviceProvider: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PadimanRouteUser',
+    required: true
   },
-  status: { 
-    type: String, 
-    enum: ['ride pending', 'ride agreed', 'ride started', 'ride ongoing', 'ride completed', 'ride cancelled'], 
-    default: 'ride pending' 
+  service: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Request',
+    required: false
   },
-  service: { type: String, required: false }, // Add this
-  serviceType: { 
-    type: String, 
-    enum: ['offer_a_ride', 'deliver_a_parcel'], 
-    required: true 
+  negotiatorService: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Request',
+    required: false
   },
-  negotiatorService: { type: String, required: false }, // Add this
-  agreedAmount: { type: Number },
-  isConfirmed: { type: Boolean, default: false },
-  isPaid: { type: Boolean, default: false },
-  deliveryDetails: { type: String }
+  serviceType: {
+    type: String,
+  },
+  negotiatorServiceType: {
+    type: String,
+    required: false
+  },
+  isPriceSet: {
+    type: Boolean,
+    default: false,
+  },
+  price: {
+    type: Number,
+    default: 0,
+  },
+  isPaid:{
+    type: Boolean,
+    default: false,
+  }
+
 }, { timestamps: true });
 
 

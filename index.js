@@ -43,7 +43,11 @@ const pr_admin = require("./routes/pr/admin.auth.router");
 const pr_admin_data = require("./routes/pr/admin");
 const { sendNotification } = require("./utils/pr/pr_push");
 const Negotiation = require("./models/padiman_route_models/Negotiation");
-
+const pru_auth = require("./routes/padiman_utility/PRUtilityRoutes");
+const pru_asset = require("./routes/padiman_utility/asset");
+const pru_sales = require("./routes/padiman_utility/sale");
+const pru_found = require("./routes/padiman_utility/lostAndFound");
+const pr_requests = require("./routes/pr/pr.request.router");
 const app = express();
 const server = http.createServer(app);
 
@@ -91,6 +95,23 @@ app.use("/api/v1/padiman_route/wallet", pr_wallet);
 app.use("/api/v1/padiman_route/driver", pr_driver);
 app.use("/api/v1/padiman_route/admin", pr_admin);
 app.use("/api/v1/padiman_route/admin/data", pr_admin_data);
+app.use(
+  "/api/v1/padiman_route/types/requests",
+  (req, res, next) => {
+    console.log(
+      `📡 [Incoming Request] ${req.method} /api/v1/padiman_route/types/requests`,
+      req.body
+    );
+    next();
+  },
+  pr_requests
+);
+
+app.use("/api/v1/pru/auth/", pru_auth);
+app.use("/api/v1/pru/assest/", pru_asset);
+app.use("/api/v1/pru/sales/", pru_sales);
+app.use("/api/v1/pru/lost-found", pru_found);
+
 //pr_driver
 //dashboardRoutes
 app.get("/", (req, res) => {
@@ -115,6 +136,22 @@ const rooms = new Map();
 io.on("connection", (socket) => {
   console.log(`👤 User Connected: ${socket.id}`);
 
+  // const getCleanId = (id) => {
+  //   if (!id) return null;
+  //   if (typeof id === "string") return id.trim();
+  //   if (typeof id === "object" && id !== null) {
+  //     return (
+  //       id.id ||
+  //       id._id ||
+  //       id.negotiationId ||
+  //       id.negotiation?.id ||
+  //       id.negotiation?._id ||
+  //       String(id)
+  //     );
+  //   }
+  //   return String(id).trim();
+  // };
+
   const getCleanId = (id) => {
     if (!id) return null;
     if (typeof id === "string") return id.trim();
@@ -131,43 +168,35 @@ io.on("connection", (socket) => {
     return String(id).trim();
   };
 
-  // === JOIN CHAT ===
-  // === JOIN CHAT ===
+  // === JOIN CHAT === (unchanged)
   socket.on("join-pr-chat", async ({ negotiationId, userPayload }) => {
     console.log("DEBUG: join-pr-chat triggered for:", negotiationId);
 
-    // 1. Validation
     if (!negotiationId || !mongoose.Types.ObjectId.isValid(negotiationId)) {
       console.error(`❌ Invalid Negotiation ID: ${negotiationId}`);
       return socket.emit("error", { message: "Invalid negotiation ID format" });
     }
 
-    if (!userPayload?.id) {
+    if (!userPayload?.id && !userPayload?._id) {
       return socket.emit("error", { message: "userPayload with id required" });
     }
 
-    // 2. Join the room
     socket.join(negotiationId);
 
-    // 3. Initialize room memory if it doesn't exist
     if (!rooms.has(negotiationId)) {
       rooms.set(negotiationId, { users: new Map(), messages: [] });
     }
 
-    // 4. Track the user
     const room = rooms.get(negotiationId);
     room.users.set(socket.id, userPayload);
 
     try {
-      // 5. FETCH ALL MESSAGES FROM DB
-      // Sort by createdAt ascending so the conversation flow is correct
       const allMessages = await NegotiationMessage.find({
         negotiation: negotiationId,
       })
         .sort({ createdAt: 1 })
         .populate("sender", "name fullName email profileImage");
 
-      // Format the messages to match the structure expected by your frontend
       const formattedMessages = allMessages.map((msg) => ({
         id: msg._id?.toString(),
         negotiation: msg.negotiation.toString(),
@@ -175,153 +204,215 @@ io.on("connection", (socket) => {
         text: msg.text,
         attachments: msg.attachments || [],
         isRead: msg.isRead || false,
+        isPriceSet: msg.isPriceSet || false,
+        price: msg.price || 0,
         readBy: msg.readBy || [],
         timestamp: msg.createdAt,
-        createdAt: msg.createdAt,
       }));
 
-      // Update in-memory room storage
-      room.messages = formattedMessages;
-
-      console.log(
-        `✅ User ${userPayload.id} joined. Sending ${formattedMessages.length} messages.`
-      );
-
-      // 6. Notify the sender WITH full history
       socket.emit("room-joined", {
         users: Array.from(room.users.values()),
         messages: formattedMessages,
       });
 
-      // 7. Notify others in the room
-      socket.to(negotiationId).emit("user-joined", {
-        userPayload,
-        socketId: socket.id,
-      });
-    } catch (err) {
-      console.error("❌ Error fetching chat history:", err);
-      socket.emit("error", { message: "Failed to load chat history" });
+      socket.to(negotiationId).emit("user-joined", { userPayload });
+    } catch (error) {
+      console.error("❌ Error joining chat:", error);
+      socket.emit("error", { message: "Failed to join chat room" });
     }
   });
 
-  // === SEND MESSAGE ===
-  // Inside pr-chat-message
+  // === SEND MESSAGE + NOTIFICATION ===
   socket.on("pr-chat-message", async (payload) => {
-    console.log("📥 [Server] Received 'pr-chat-message' payload:", payload);
-
-    const { negotiation, text, attachments = [], senderId, clientId } = payload;
-    const cleanNegotiationId = getCleanId(negotiation);
-
-    console.log(`🔍 [Server] Cleaned Negotiation ID: ${cleanNegotiationId}`);
-
     try {
-      // Check sender
-      const finalSender = senderId;
-      console.log(`👤 [Server] Identified Sender ID: ${finalSender}`);
+      const {
+        negotiation,
+        text,
+        attachments,
+        senderId,
+        price,
+        isPriceSet,
+        clientId,
+      } = payload;
 
-      if (!finalSender) {
-        console.error(
-          "❌ [Server] Message rejected: No user session (socket.userPayload) found."
-        );
-        return socket.emit("error", { message: "User session missing" });
+      const cleanNegotiationId = getCleanId(negotiation);
+
+      let finalMessageText = text ? text.trim() : "";
+      if (!finalMessageText && isPriceSet && Number(price) > 0) {
+        finalMessageText = `A counter offer of ₦${Number(
+          price
+        ).toLocaleString()} was made.`;
+      }
+      if (!finalMessageText) {
+        finalMessageText = "Counter offer details attached.";
       }
 
-      if (!cleanNegotiationId || !text?.trim()) {
-        console.error(
-          "❌ [Server] Message rejected: Missing ID or text content."
-        );
-        return socket.emit("error", {
-          message: "negotiation and text required",
-        });
-      }
-
-      console.log("💾 [Server] Attempting to save message to DB...");
-      const chatMessage = await NegotiationMessage.create({
+      // Save message
+      const newMessage = await NegotiationMessage.create({
         negotiation: cleanNegotiationId,
-        sender: finalSender,
-        text: text.trim(),
-        attachments: Array.isArray(attachments) ? attachments : [],
-        UUID: clientId,
+        sender: senderId,
+        text: finalMessageText,
+        attachments: attachments || [],
+        price: price || 0,
+        isPriceSet: isPriceSet || false,
+        isRead: false,
       });
 
-      const negotiationDoc = await Negotiation.findById(cleanNegotiationId)
-        .populate("negotiator", "fullName")
-        .populate("serviceProvider", "fullName");
+      const populatedMessage = await newMessage.populate(
+        "sender",
+        "name fullName email profileImage"
+      );
 
-      if (negotiationDoc) {
-        // Determine IDs
-        const negotiatorId = negotiationDoc.negotiator?._id.toString();
-        const providerId = negotiationDoc.serviceProvider?._id.toString();
-        const senderIdStr = finalSender.toString();
-
-        const receiverId =
-          senderIdStr === negotiatorId ? providerId : negotiatorId;
-
-        // Determine Sender's Name
-        // Check if sender is the negotiator or the provider to grab the right name
-        const senderName =
-          senderIdStr === negotiatorId
-            ? negotiationDoc.negotiator?.fullName
-            : negotiationDoc.serviceProvider?.fullName || "A user";
-
-        if (receiverId) {
-          const notificationData = {
-            // 💡 This now includes the sender's name dynamically
-            title: `New message from ${senderName}`,
-            body: text.length > 50 ? text.substring(0, 47) + "..." : text,
-            router: "CHAT_SCREEN",
-            type: "MESSAGE",
-            data: {
-              negotiationId: cleanNegotiationId,
-            },
-          };
-
-          sendNotification(receiverId, notificationData).catch((err) =>
-            console.error("Notification failed:", err)
-          );
-        }
-      }
-
-      const populated = await chatMessage.populate({
-        path: "sender",
-        select: "name fullName email profileImage",
-      });
-
-      const messagePayload = {
-        id: populated._id.toString(),
-        negotiation: populated.negotiation.toString(),
-        sender: populated.sender,
-        text: populated.text,
-        attachments: populated.attachments || [],
-        isRead: populated.isRead || false,
-        readBy: populated.readBy || [],
-        timestamp: populated.createdAt,
-        createdAt: populated.createdAt,
-        UUID: clientId, // ← ADD THIS
-        clientId, // ← Keep for compatibility
+      const messageToSend = {
+        id: populatedMessage._id.toString(),
+        negotiation: cleanNegotiationId,
+        sender: populatedMessage.sender,
+        text: populatedMessage.text,
+        attachments: populatedMessage.attachments,
+        isRead: populatedMessage.isRead,
+        isPriceSet: populatedMessage.isPriceSet,
+        price: populatedMessage.price,
+        readBy: populatedMessage.readBy,
+        timestamp: populatedMessage.createdAt,
+        clientId,
       };
 
-      console.log(
-        "✅ [Server] Message saved and populated. Emitting to room:",
-        cleanNegotiationId
-      );
+      // Broadcast message
+      io.to(cleanNegotiationId).emit("pr-chat-message", messageToSend);
 
-      // Broadcast back to the room
-      io.to(cleanNegotiationId).emit("pr-chat-message", messagePayload);
-
-      // Acknowledge to the sender
-      socket.emit("messageSent", { success: true, message: messagePayload });
-      console.log(
-        "🚀 [Server] 'pr-chat-message' broadcasted and 'messageSent' acknowledged."
+      // === SEND NOTIFICATION TO OTHER PARTY ===
+      await sendChatNotification(
+        cleanNegotiationId,
+        populatedMessage,
+        senderId
       );
-    } catch (err) {
-      console.error("❌ [Server] Critical Database/Message error:", err);
-      socket.emit("error", {
-        message: "Failed to send message",
-        details: err.message,
-      });
+    } catch (error) {
+      console.error("❌ Error sending message:", error);
+      socket.emit("error", { message: "Failed to send message" });
     }
   });
+
+  // === AGREE TO PRICE + NOTIFICATION ===
+  socket.on("pr-agree-price", async ({ messageId, negotiationId, price }) => {
+    try {
+      const cleanNegotiationId = getCleanId(negotiationId);
+
+      const updatedNegotiation = await Negotiation.findByIdAndUpdate(
+        cleanNegotiationId,
+        { isPriceSet: true, price: price },
+        { new: true }
+      );
+
+      // Broadcast to room
+      io.to(cleanNegotiationId).emit("price-agreed", {
+        messageId,
+        negotiationId: cleanNegotiationId,
+        price,
+        updatedNegotiation,
+      });
+
+      console.log(
+        `✅ [Price Agreed] Room: ${cleanNegotiationId} | Price: ₦${price}`
+      );
+
+      // === SEND NOTIFICATION WHEN PRICE IS AGREED ===
+      await sendPriceAgreedNotification(cleanNegotiationId, price);
+    } catch (error) {
+      console.error("❌ Error agreeing to price:", error);
+      socket.emit("error", { message: "Failed to agree to price" });
+    }
+  });
+
+  // ====================== HELPER FUNCTIONS ======================
+
+  // Send notification for new chat message
+  const sendChatNotification = async (
+    negotiationId,
+    populatedMessage,
+    senderId
+  ) => {
+    try {
+      const negotiationDoc = await Negotiation.findById(negotiationId)
+        .populate("negotiator", "fullName")
+        .populate("serviceProvider", "fullName")
+        .lean();
+
+      if (!negotiationDoc) return;
+
+      const senderObjectId = new mongoose.Types.ObjectId(senderId);
+      let receiverId = null;
+
+      if (
+        negotiationDoc.negotiator &&
+        !senderObjectId.equals(negotiationDoc.negotiator._id)
+      ) {
+        receiverId = negotiationDoc.negotiator._id;
+      } else if (
+        negotiationDoc.serviceProvider &&
+        !senderObjectId.equals(negotiationDoc.serviceProvider._id)
+      ) {
+        receiverId = negotiationDoc.serviceProvider._id;
+      }
+
+      if (receiverId) {
+        const senderName = populatedMessage.sender?.fullName || "Someone";
+        const messagePreview =
+          populatedMessage.text.substring(0, 60) +
+          (populatedMessage.text.length > 60 ? "..." : "");
+
+        await sendNotification(receiverId, {
+          title: "New Message",
+          body: `${senderName}: ${messagePreview}`,
+          type: "CHAT",
+          router: "/(features)/chat",
+          data: {
+            negotiationId: negotiationId,
+            messageId: populatedMessage._id.toString(),
+            senderId: senderId,
+            isPriceOffer: populatedMessage.isPriceSet,
+          },
+        });
+      }
+    } catch (err) {
+      console.error("❌ Chat Notification Error:", err);
+    }
+  };
+
+  // Send notification when price is agreed
+  const sendPriceAgreedNotification = async (negotiationId, price) => {
+    try {
+      const negotiationDoc = await Negotiation.findById(negotiationId)
+        .populate("negotiator", "fullName")
+        .populate("serviceProvider", "fullName")
+        .lean();
+
+      if (!negotiationDoc) return;
+
+      // Notify both parties
+      const receivers = [
+        negotiationDoc.negotiator?._id,
+        negotiationDoc.serviceProvider?._id,
+      ].filter(Boolean);
+
+      for (const receiverId of receivers) {
+        await sendNotification(receiverId, {
+          title: "Price Agreed! 🎉",
+          body: `The price of ₦${Number(
+            price
+          ).toLocaleString()} has been accepted.`,
+          type: "NEGOTIATION",
+          router: "/(features)/chat",
+          data: {
+            negotiationId: negotiationId,
+            price: price,
+            status: "price_agreed",
+          },
+        });
+      }
+    } catch (err) {
+      console.error("❌ Price Agreement Notification Error:", err);
+    }
+  };
 
   socket.on("register_user", async ({ userId }) => {
     if (!userId) return;

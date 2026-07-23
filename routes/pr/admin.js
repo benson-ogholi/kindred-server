@@ -1,17 +1,16 @@
 const express = require("express");
 const {
   getAllUsers,
-  getAllParcelRequests,
-  getAllParcels,
+  getAllRequests,
+  getRequestById,
   getAllPayments,
-  getAllRideOffers,
   getAllNegotiations,
   getAllDriverApplications,
   updateDriverStatus,
   getAllWithdrawals,
   updateWithdrawalStatus,
   getAdminDashboardStats,
-  getAllAdminCommissions, // --- IMPORTED NEW COMMISSIONS CONTROLLER ---
+  getAllAdminCommissions,
 } = require("../../controllers/padiman_route_controllers/pr.admin");
 const router = express.Router();
 
@@ -29,12 +28,13 @@ router.get("/users", getAllUsers);
 // Driver Verification Queue
 router.get("/driver-applications", getAllDriverApplications);
 
-// Logistics & Deliveries
-router.get("/parcel-requests", getAllParcelRequests);
-router.get("/parcels", getAllParcels);
-
-// Ride Hailing
-router.get("/ride-offers", getAllRideOffers);
+// Unified Requests (join-ride, offer-ride, send-package, deliver-package)
+// — replaces the old separate parcel-requests / parcels / ride-offers
+// routes. Supports optional ?type= and ?status= query filters.
+// @route   GET /api/admin/requests
+// @route   GET /api/admin/requests/:id
+router.get("/requests", getAllRequests);
+router.get("/requests/:id", getRequestById);
 
 // Core System Actions
 router.get("/negotiations", getAllNegotiations);

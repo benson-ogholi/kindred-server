@@ -1,4 +1,5 @@
-const Wallet = require("../../models/padiman_route_models/Wallet");
+const { Wallet } = require("../../models/padiman_route_models/Wallet");
+const Request = require("../../models/padiman_route_models/Request");
 const axios = require("axios");
 const { sendNotification } = require("../../utils/pr/pr_push");
 
@@ -7,49 +8,91 @@ const PAYSTACK_HEADERS = {
   "Content-Type": "application/json",
 };
 
-// 1. Get User Wallet
-// 1. Get User Wallet
+// 1. Get User Wallet (With Auto Escrow Release)
 exports.getWallet = async (req, res) => {
   console.log(
-    `🔍 [GET WALLET START] Fetching wallet for User ID: ${req.user.id}`
+    `🔍 [GET WALLET START] Fetching wallet for User ID: ${
+      req.user.id || req.user
+    }`
   );
 
   try {
-    // Log the search criteria
-    console.log(
-      `📝 [DB QUERY] Finding wallet with: { user: '${req.user.id}' }`
-    );
+    const userId = req.user.id || req.user;
+    console.log(`📝 [DB QUERY] Finding wallet with: { user: '${userId}' }`);
 
-    const wallet = await Wallet.findOne({ user: req.user });
+    const wallet = await Wallet.findOne({ user: userId });
 
     if (!wallet) {
       console.log(
-        `⚠️ [WALLET NOT FOUND] No wallet record exists for User: ${req.user.id}`
+        `⚠️ [WALLET NOT FOUND] No wallet record exists for User: ${userId}`
       );
       return res.status(404).json({ message: "Wallet not found" });
     }
 
-    console.log(
-      "✅ [GET WALLET SUCCESS] Wallet found:",
-      JSON.stringify(wallet, null, 2)
-    );
+    // =========================================================================
+    // ESCROW AUTO-RELEASE LOGIC
+    // Check pending earnings to see if their requests have been confirmed
+    // =========================================================================
+    let requiresSave = false;
+
+    if (wallet.earnings && wallet.earnings.length > 0) {
+      for (const earning of wallet.earnings) {
+        // Target earnings that are currently held in escrow
+        if (earning.status === "pending" || earning.status === "escrow") {
+          let associatedRequest = null;
+
+          // Attempt to locate the request via serviceId or negotiationId
+          if (earning.serviceId) {
+            associatedRequest = await Request.findById(earning.serviceId);
+          } else if (earning.negotiationId) {
+            associatedRequest = await Request.findOne({
+              negotiation: earning.negotiationId,
+            });
+          }
+
+          // If the request is confirmed, clear the funds from escrow
+          if (associatedRequest && associatedRequest.status === "confirmed") {
+            earning.status = "success";
+
+            // Ensure withdrawable balance is initialized if it's somehow missing
+            if (typeof wallet.withdrawableBalance !== "number") {
+              wallet.withdrawableBalance = 0;
+            }
+
+            wallet.balance += earning.amount;
+            wallet.withdrawableBalance += earning.amount;
+            requiresSave = true;
+
+            console.log(
+              `✅ [ESCROW AUTO-RELEASE] ₦${earning.amount} cleared to balance from confirmed request ${associatedRequest._id}.`
+            );
+          }
+        }
+      }
+    }
+
+    if (requiresSave) {
+      await wallet.save();
+    }
+    // =========================================================================
+
+    console.log("✅ [GET WALLET SUCCESS] Wallet found and escrow synced.");
     res.status(200).json(wallet);
   } catch (error) {
     console.error("💥 [GET WALLET CRITICAL ERROR]:", error.message);
-    // Log the full error stack for better debugging
-    console.error(error);
-
-    res.status(500).json({
-      message: "Error fetching wallet",
-      error: error.message,
-    });
+    res
+      .status(500)
+      .json({ message: "Error fetching wallet", error: error.message });
   }
 };
 
 // 2. Get Earnings History
 exports.getEarnings = async (req, res) => {
   try {
-    const wallet = await Wallet.findOne({ user: req.user }, "earnings");
+    const userId = req.user.id || req.user;
+    const wallet = await Wallet.findOne({ user: userId }, "earnings").populate(
+      "earnings.payment earnings.negotiationId earnings.serviceId"
+    );
     res.status(200).json(wallet.earnings);
   } catch (error) {
     res.status(500).json({ message: "Error fetching earnings", error });
@@ -59,7 +102,8 @@ exports.getEarnings = async (req, res) => {
 // 3. Get Withdrawal History
 exports.getWithdrawals = async (req, res) => {
   try {
-    const wallet = await Wallet.findOne({ user: req.user }, "withdrawals");
+    const userId = req.user.id || req.user;
+    const wallet = await Wallet.findOne({ user: userId }, "withdrawals");
     res.status(200).json(wallet.withdrawals);
   } catch (error) {
     res.status(500).json({ message: "Error fetching withdrawals", error });
@@ -82,58 +126,53 @@ exports.getBankList = async (req, res) => {
 };
 
 // 5. Request a Withdrawal
-// 5. Request a Withdrawal
 exports.requestWithdrawal = async (req, res) => {
   const { amount, bankDetails } = req.body;
-  const targetUserId = req.user?.id || req.user; // Normalizing safety check for the User ID
+  const targetUserId = req.user?.id || req.user;
 
   try {
-    const wallet = await Wallet.findOne({ user: req.user });
+    const wallet = await Wallet.findOne({ user: targetUserId });
 
     if (!wallet) {
       return res.status(404).json({ message: "Wallet not found" });
     }
 
-    // Ensure withdrawableBalance primitive layer exists as a fallback number type
     if (typeof wallet.withdrawableBalance !== "number") {
       wallet.withdrawableBalance = 0;
     }
 
-    // Safety check: Validate the request amount against BOTH general and clear spendable balances
     if (wallet.balance < amount || wallet.withdrawableBalance < amount) {
-      return res.status(400).json({ 
-        message: "Insufficient clear balance available for withdrawal. Please confirm some funds are not still locked in escrow." 
+      return res.status(400).json({
+        message:
+          "Insufficient clear balance available for withdrawal. Please confirm some funds are not still locked in escrow.",
       });
     }
 
-    // --- DEDUCTION OPERATIONS ---
-    // Remove the funds from general cumulative tracking balance
     wallet.balance -= amount;
-    
-    // Remove the funds from the clear withdrawable wallet balance tracking metric
     wallet.withdrawableBalance -= amount;
 
-    // Create new withdrawal object layout to capture system ID reference arrays
+    // Matches the new schema's withdrawals array perfectly
     const withdrawalEntry = {
       amount,
-      bankDetails,
+      bankDetails: {
+        accountName: bankDetails?.accountName,
+        accountNumber: bankDetails?.accountNumber,
+        bankName: bankDetails?.bankName,
+      },
       status: "pending",
     };
 
     wallet.withdrawals.push(withdrawalEntry);
     await wallet.save();
 
-    // Grab the exact sub-document record to access its structural DB _id reference string
     const savedWithdrawal = wallet.withdrawals[wallet.withdrawals.length - 1];
 
-    // ====================== SEND WITHDRAWAL QUEUED NOTIFICATION ======================
-    // Enriched with localized bank recipient payloads, values, and matching explicit app scopes
     try {
       await sendNotification(targetUserId, {
         title: "Withdrawal Queued ⏳",
         body: `Your withdrawal request of ₦${amount.toLocaleString()} is processing and has been queued.`,
         type: "WITHDRAWAL",
-        router: "/(tabs)/wallet", // Adjust path matching layout schemas
+        router: "/(tabs)/wallet",
         data: {
           withdrawalId: savedWithdrawal?._id
             ? savedWithdrawal._id.toString()
@@ -148,13 +187,11 @@ exports.requestWithdrawal = async (req, res) => {
       });
       console.log("✅ [PUSH NOTIFICATION] Withdrawal queued alert dispatched.");
     } catch (pushError) {
-      // Caught independently to ensure server processes the network action even if push channels drop offline
       console.error(
         "⚠️ [PUSH ERROR] Failed to deliver withdrawal alert thread:",
         pushError.message
       );
     }
-    // =================================================================================
 
     res.status(200).json({ message: "Withdrawal request submitted", wallet });
   } catch (error) {
@@ -167,47 +204,20 @@ exports.requestWithdrawal = async (req, res) => {
 // 6. Initialize Wallet Funding
 exports.initializeFunding = async (req, res) => {
   console.log("=== INITIALIZE FUNDING CONTROLLER STARTED ===");
-  console.log("Request User Data Context ID:", req.user?.id);
-
   const { amount, email } = req.body;
 
-  console.log("Extracted Amount:", amount);
-  console.log("Extracted Email Target:", email);
-
   if (!amount || amount < 100) {
-    console.log("❌ Validation Failed: Invalid or too low amount");
-    return res.status(400).json({
-      message: "Minimum funding amount is ₦100",
-    });
+    return res.status(400).json({ message: "Minimum funding amount is ₦100" });
   }
 
   try {
-    console.log("Preparing Paystack request...");
-    console.log("Paystack Amount (in Kobo):", amount * 100);
-
     const response = await axios.post(
       "https://api.paystack.co/transaction/initialize",
-      {
-        email: email,
-        amount: amount * 100,
-      },
+      { email, amount: amount * 100 },
       { headers: PAYSTACK_HEADERS }
     );
-
-    console.log("✅ Paystack API Response Status:", response.status);
-    console.log("✅ Reference Generated:", response.data.data.reference);
-
-    console.log("=== INITIALIZE FUNDING CONTROLLER SUCCESS ===");
     res.status(200).json(response.data.data);
   } catch (error) {
-    console.log("❌ Paystack Request Failed");
-    if (error.response) {
-      console.log("Error Status:", error.response.status);
-      console.log("Error Data:", JSON.stringify(error.response.data, null, 2));
-    } else {
-      console.log("❌ Error setting up request:", error.message);
-    }
-    console.log("=== INITIALIZE FUNDING CONTROLLER FAILED ===");
     res.status(500).json({
       message: "Failed to initialize payment",
       error: error.message,
@@ -215,122 +225,67 @@ exports.initializeFunding = async (req, res) => {
   }
 };
 
-// 7. Verify Payment & Top-up Wallet (FIXED & FULLY LOGGED)
+// 7. Verify Payment & Top-up Wallet
 exports.verifyAndTopUp = async (req, res) => {
   console.log("=== VERIFY AND TOP UP CONTROLLER STARTED ===");
   const { reference } = req.params;
-  const userId = req.user?.id;
-
-  console.log(`🔍 Target Reference Token: "${reference}"`);
-  console.log(`👤 Request Executing User ID: "${userId}"`);
+  const userId = req.user?.id || req.user;
 
   try {
-    // 1. Fetch user wallet first to check for duplicates
     const wallet = await Wallet.findOne({ user: userId });
     if (!wallet) {
-      console.log("❌ Wallet record lookup returned null for user:", userId);
       return res
         .status(404)
         .json({ message: "Wallet data structure not found." });
     }
 
-    // 2. Prevent duplicate allocation loops (Idempotency check)
     const isAlreadyProcessed = wallet.earnings.some(
       (earning) => earning.reference === reference
     );
-
     if (isAlreadyProcessed) {
-      console.log(
-        `⚠️ Reference "${reference}" has already been processed and credited before. Exiting early.`
-      );
       return res.status(200).json({
         message: "This transaction has already been credited to your balance.",
         balance: wallet.balance,
       });
     }
 
-    console.log(`📡 Reaching out to Paystack Endpoint to audit reference...`);
     const response = await axios.get(
       `https://api.paystack.co/transaction/verify/${reference}`,
-      { headers: PAYSTACK_HEADERS }
-    );
-
-    console.log(
-      "✅ Paystack Verification Network Status Code:",
-      response.status
+      {
+        headers: PAYSTACK_HEADERS,
+      }
     );
 
     const transaction = response.data?.data;
-    if (!transaction) {
-      console.log(
-        "❌ Paystack verification did not return transaction body object data details."
-      );
-      return res
-        .status(400)
-        .json({ message: "Invalid response from gateway verifier." });
-    }
-
-    console.log(`📊 Gateway Status Returned: "${transaction.status}"`);
-    console.log(`📊 Gateway Computed Amount (Kobo):`, transaction.amount);
-
-    if (transaction.status !== "success") {
-      console.log(
-        `❌ Transaction verification rejected. Status is not "success".`
-      );
+    if (!transaction || transaction.status !== "success") {
       return res
         .status(400)
         .json({ message: "Transaction was not completely successful." });
     }
 
     const amountAdded = transaction.amount / 100;
-    console.log(
-      `💰 Converting Kobo units to Naira values. Crediting: ₦${amountAdded}`
-    );
 
-    // 3. Update memory ledger entries
+    // Add funds to both total balance and withdrawable balance since it's a direct user top-up
     wallet.balance += amountAdded;
+    wallet.withdrawableBalance += amountAdded;
+
+    // Matches the newly added properties inside the schema's earnings array
     wallet.earnings.push({
       amount: amountAdded,
       source: "Wallet Funding",
       reference: reference,
+      payerEmail: transaction.customer?.email || "",
+      status: "success",
       createdAt: new Date(),
     });
 
-    console.log(
-      "💾 Persisting adjustments into MongoDB instance database layout..."
-    );
     await wallet.save();
-
-    console.log(
-      `✅ Wallet balance saved successfully. New Total: ₦${wallet.balance}`
-    );
-    console.log("=== VERIFY AND TOP UP CONTROLLER SUCCESS ===");
 
     return res.status(200).json({
       message: "Wallet funded successfully",
       balance: wallet.balance,
     });
   } catch (error) {
-    console.log("❌ VERIFICATION RUNTIME EXCEPTION INTERCEPTED ❌");
-
-    if (error.response) {
-      console.error(
-        "Paystack Gateway Response Error Body Status:",
-        error.response.status
-      );
-      console.error(
-        "Paystack Gateway Response Error Body Data:",
-        JSON.stringify(error.response.data, null, 2)
-      );
-    } else {
-      console.error(
-        "Local Thread Processing Core Error message:",
-        error.message
-      );
-      console.error("Stack Trace Analysis:", error);
-    }
-
-    console.log("=== VERIFY AND TOP UP CONTROLLER FAILED ===");
     return res.status(500).json({
       message: "Verification failed to compile processing details.",
       error: error.message,
@@ -338,18 +293,11 @@ exports.verifyAndTopUp = async (req, res) => {
   }
 };
 
+// 8. Resolve Account
 exports.resolveAccount = async (req, res) => {
-  // Extract from req.body instead of req.query
   const { accountNumber, bankCode } = req.body;
 
-  console.log(
-    `🔍 [RESOLVE ACCOUNT START] Body received -> Account: ${accountNumber}, Bank Code: ${bankCode}`
-  );
-
   if (!accountNumber || !bankCode) {
-    console.log(
-      "⚠️ [RESOLVE ACCOUNT VALIDATION FAILED] Missing body parameters"
-    );
     return res.status(400).json({
       message: "accountNumber and bankCode are required in the request body.",
     });
@@ -363,11 +311,7 @@ exports.resolveAccount = async (req, res) => {
 
   try {
     const url = `https://api.paystack.co/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`;
-
-    // Still use GET for the external Paystack request
     const response = await axios.get(url, { headers: PAYSTACK_HEADERS });
-
-    console.log("✅ [GATEWAY SUCCESS]");
 
     return res.status(200).json({
       message: "Account details resolved successfully",
@@ -375,11 +319,6 @@ exports.resolveAccount = async (req, res) => {
       accountNumber: response.data.data.account_number,
     });
   } catch (error) {
-    console.error(
-      "❌ [RESOLVE ACCOUNT ERROR]:",
-      error.response?.data || error.message
-    );
-
     return res.status(error.response?.status || 500).json({
       message:
         error.response?.data?.message || "Could not resolve account details.",

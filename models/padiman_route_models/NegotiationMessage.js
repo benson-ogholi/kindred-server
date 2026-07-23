@@ -22,10 +22,9 @@ const NegotiationMessageSchema = new mongoose.Schema(
       trim: true,
       maxlength: 2000,
     },
-    // Optional: for future media support
     attachments: [
       {
-        type: String, // URL or file path
+        type: String,
         default: [],
       },
     ],
@@ -33,17 +32,23 @@ const NegotiationMessageSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    pickupCode: { type: String },
+    isPriceSet: {
+      type: Boolean,
+      default: false,
+    },
     readBy: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "PadimanRouteUser",
       },
     ],
+    price: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true }
 );
-
 // Indexes for fast queries
 NegotiationMessageSchema.index({ negotiation: 1, createdAt: -1 });
 

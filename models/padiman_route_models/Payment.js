@@ -21,11 +21,6 @@ const PaymentSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
-    serviceType: {
-      type: String,
-      enum: ["deliver_a_parcel", "offer_a_ride"],
-      required: true,
-    },
     status: {
       type: String,
       enum: ["pending", "success", "failed"],
