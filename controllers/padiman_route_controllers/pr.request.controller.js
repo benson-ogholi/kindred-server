@@ -451,8 +451,7 @@ exports.updateRequest = async (req, res) => {
   }
 };
 
-// 5. Update Request Progress (PATCH /api/requests/:id/progress)
-// 5. Update Request Progress (PATCH /api/requests/:id/progress)
+
 exports.updateRequestProgress = async (req, res) => {
   try {
     const { id } = req.params;

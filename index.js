@@ -48,6 +48,11 @@ const pru_asset = require("./routes/padiman_utility/asset");
 const pru_sales = require("./routes/padiman_utility/sale");
 const pru_found = require("./routes/padiman_utility/lostAndFound");
 const pr_requests = require("./routes/pr/pr.request.router");
+
+// NEW — needed for pr-update-request-progress
+const Request = require("./models/padiman_route_models/Request"); // ADJUST — confirm this is the real path to your Request model
+const STATUS_COPY = require("./constants/pr/statusCopy"); // ADJUST — confirm this is the real path; must export { [status]: { title, body } }
+
 const app = express();
 const server = http.createServer(app);
 
@@ -134,23 +139,7 @@ function getDefaultMessage(type) {
 const rooms = new Map();
 
 io.on("connection", (socket) => {
-  console.log(`👤 User Connected: ${socket.id}`);
-
-  // const getCleanId = (id) => {
-  //   if (!id) return null;
-  //   if (typeof id === "string") return id.trim();
-  //   if (typeof id === "object" && id !== null) {
-  //     return (
-  //       id.id ||
-  //       id._id ||
-  //       id.negotiationId ||
-  //       id.negotiation?.id ||
-  //       id.negotiation?._id ||
-  //       String(id)
-  //     );
-  //   }
-  //   return String(id).trim();
-  // };
+  console.log(`👤 [Connection] User Connected: ${socket.id}`);
 
   const getCleanId = (id) => {
     if (!id) return null;
@@ -168,16 +157,33 @@ io.on("connection", (socket) => {
     return String(id).trim();
   };
 
-  // === JOIN CHAT === (unchanged)
+  // NEW — formats a Date into a short display time, e.g. "3:45 PM"
+  const formatMessageTime = (date) => {
+    if (!date) return "";
+    return new Date(date).toLocaleTimeString("en-NG", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+  };
+
+  // === JOIN CHAT === (+ type/meta/time fields)
   socket.on("join-pr-chat", async ({ negotiationId, userPayload }) => {
-    console.log("DEBUG: join-pr-chat triggered for:", negotiationId);
+    console.log(
+      `📥 [join-pr-chat] Socket ${socket.id} requesting to join negotiation:`,
+      negotiationId
+    );
+    console.log(`👤 [join-pr-chat] User payload received:`, userPayload);
 
     if (!negotiationId || !mongoose.Types.ObjectId.isValid(negotiationId)) {
-      console.error(`❌ Invalid Negotiation ID: ${negotiationId}`);
+      console.error(
+        `❌ [join-pr-chat] Invalid Negotiation ID provided: ${negotiationId}`
+      );
       return socket.emit("error", { message: "Invalid negotiation ID format" });
     }
 
     if (!userPayload?.id && !userPayload?._id) {
+      console.error(`❌ [join-pr-chat] Missing user ID in userPayload`);
       return socket.emit("error", { message: "userPayload with id required" });
     }
 
@@ -185,45 +191,71 @@ io.on("connection", (socket) => {
 
     if (!rooms.has(negotiationId)) {
       rooms.set(negotiationId, { users: new Map(), messages: [] });
+      console.log(
+        `🏠 [join-pr-chat] Created new room structure in memory for: ${negotiationId}`
+      );
     }
 
     const room = rooms.get(negotiationId);
     room.users.set(socket.id, userPayload);
 
     try {
+      console.log(
+        `⏳ [join-pr-chat] Fetching messages for negotiation: ${negotiationId}...`
+      );
       const allMessages = await NegotiationMessage.find({
         negotiation: negotiationId,
       })
         .sort({ createdAt: 1 })
         .populate("sender", "name fullName email profileImage");
 
+      console.log(
+        `✅ [join-pr-chat] Retrieved ${allMessages.length} messages from DB.`
+      );
+
       const formattedMessages = allMessages.map((msg) => ({
         id: msg._id?.toString(),
         negotiation: msg.negotiation.toString(),
         sender: msg.sender,
         text: msg.text,
+        type: msg.type || "text", // NEW — "text" | "status" | "price" | "system"
+        meta: msg.meta || {}, // NEW — carries { status, currentLocation, requestId } for status messages
         attachments: msg.attachments || [],
         isRead: msg.isRead || false,
         isPriceSet: msg.isPriceSet || false,
         price: msg.price || 0,
         readBy: msg.readBy || [],
         timestamp: msg.createdAt,
+        time: formatMessageTime(msg.createdAt), // NEW
       }));
 
       socket.emit("room-joined", {
         users: Array.from(room.users.values()),
         messages: formattedMessages,
       });
+      console.log(
+        `✅ [join-pr-chat] Emitted 'room-joined' to socket ${socket.id} with history.`
+      );
 
       socket.to(negotiationId).emit("user-joined", { userPayload });
+      console.log(
+        `✅ [join-pr-chat] Broadcasted 'user-joined' to room ${negotiationId}.`
+      );
     } catch (error) {
-      console.error("❌ Error joining chat:", error);
+      console.error("❌ [join-pr-chat] Error joining chat:", error);
       socket.emit("error", { message: "Failed to join chat room" });
     }
   });
 
-  // === SEND MESSAGE + NOTIFICATION ===
+  // === SEND MESSAGE + NOTIFICATION === (+ type/time fields)
   socket.on("pr-chat-message", async (payload) => {
+    console.log(
+      `📥 [pr-chat-message] Received message payload from sender: ${payload.senderId}`
+    );
+    console.log(
+      `📄 [pr-chat-message] Payload text: "${payload.text}", priceSet: ${payload.isPriceSet}, price: ${payload.price}`
+    );
+
     try {
       const {
         negotiation,
@@ -242,12 +274,18 @@ io.on("connection", (socket) => {
         finalMessageText = `A counter offer of ₦${Number(
           price
         ).toLocaleString()} was made.`;
+        console.log(
+          `📝 [pr-chat-message] Auto-generated price offer text: ${finalMessageText}`
+        );
       }
       if (!finalMessageText) {
         finalMessageText = "Counter offer details attached.";
       }
 
       // Save message
+      console.log(
+        `⏳ [pr-chat-message] Saving new message to DB for negotiation: ${cleanNegotiationId}...`
+      );
       const newMessage = await NegotiationMessage.create({
         negotiation: cleanNegotiationId,
         sender: senderId,
@@ -256,6 +294,7 @@ io.on("connection", (socket) => {
         price: price || 0,
         isPriceSet: isPriceSet || false,
         isRead: false,
+        type: isPriceSet ? "price" : "text", // NEW — tag price-offer messages distinctly
       });
 
       const populatedMessage = await newMessage.populate(
@@ -263,40 +302,54 @@ io.on("connection", (socket) => {
         "name fullName email profileImage"
       );
 
+      console.log(
+        `✅ [pr-chat-message] Message saved with ID: ${populatedMessage._id.toString()}`
+      );
+
       const messageToSend = {
         id: populatedMessage._id.toString(),
         negotiation: cleanNegotiationId,
         sender: populatedMessage.sender,
         text: populatedMessage.text,
+        type: populatedMessage.type || "text", // NEW
         attachments: populatedMessage.attachments,
         isRead: populatedMessage.isRead,
         isPriceSet: populatedMessage.isPriceSet,
         price: populatedMessage.price,
         readBy: populatedMessage.readBy,
         timestamp: populatedMessage.createdAt,
+        time: formatMessageTime(populatedMessage.createdAt), // NEW
         clientId,
       };
 
       // Broadcast message
       io.to(cleanNegotiationId).emit("pr-chat-message", messageToSend);
+      console.log(
+        `✅ [pr-chat-message] Emitted 'pr-chat-message' to room ${cleanNegotiationId}`
+      );
 
       // === SEND NOTIFICATION TO OTHER PARTY ===
+      console.log(`⏳ [pr-chat-message] Triggering push notification...`);
       await sendChatNotification(
         cleanNegotiationId,
         populatedMessage,
         senderId
       );
     } catch (error) {
-      console.error("❌ Error sending message:", error);
+      console.error("❌ [pr-chat-message] Error sending message:", error);
       socket.emit("error", { message: "Failed to send message" });
     }
   });
 
   // === AGREE TO PRICE + NOTIFICATION ===
   socket.on("pr-agree-price", async ({ messageId, negotiationId, price }) => {
+    console.log(
+      `📥 [pr-agree-price] Received price agreement for negotiation: ${negotiationId} | Price: ₦${price}`
+    );
     try {
       const cleanNegotiationId = getCleanId(negotiationId);
 
+      console.log(`⏳ [pr-agree-price] Updating negotiation DB record...`);
       const updatedNegotiation = await Negotiation.findByIdAndUpdate(
         cleanNegotiationId,
         { isPriceSet: true, price: price },
@@ -312,14 +365,232 @@ io.on("connection", (socket) => {
       });
 
       console.log(
-        `✅ [Price Agreed] Room: ${cleanNegotiationId} | Price: ₦${price}`
+        `✅ [pr-agree-price] Price Agreed and broadcasted | Room: ${cleanNegotiationId} | Price: ₦${price}`
       );
 
       // === SEND NOTIFICATION WHEN PRICE IS AGREED ===
+      console.log(
+        `⏳ [pr-agree-price] Triggering push notification for price agreement...`
+      );
       await sendPriceAgreedNotification(cleanNegotiationId, price);
     } catch (error) {
-      console.error("❌ Error agreeing to price:", error);
+      console.error("❌ [pr-agree-price] Error agreeing to price:", error);
       socket.emit("error", { message: "Failed to agree to price" });
+    }
+  });
+
+  // ====================== NEW — UPDATE REQUEST STATUS / LOCATION FROM SOCKET ======================
+  // ====================== NEW — UPDATE REQUEST STATUS / LOCATION FROM SOCKET ======================
+  socket.on("pr-update-request-progress", async (payload) => {
+    console.log(
+      `📥 [pr-update-request-progress] Received status update payload:`,
+      payload
+    );
+    try {
+      const { requestId, negotiationId, status, currentLocation, senderId } =
+        payload;
+
+      if (!requestId || !mongoose.Types.ObjectId.isValid(requestId)) {
+        console.error(
+          `❌ [pr-update-request-progress] Valid requestId is missing or invalid: ${requestId}`
+        );
+        return socket.emit("error", { message: "Valid requestId is required" });
+      }
+
+      console.log(
+        `⏳ [pr-update-request-progress] Finding request by ID: ${requestId}...`
+      );
+      const requestItem = await Request.findById(requestId);
+      if (!requestItem) {
+        console.error(
+          `❌ [pr-update-request-progress] Request not found for ID: ${requestId}`
+        );
+        return socket.emit("error", { message: "Request not found" });
+      }
+
+      // NOTE: by the time this runs, the client's earlier REST call
+      // (updateRequestProgress) has usually ALREADY written the new status
+      // to this same document. That means `requestItem.status` here may
+      // already equal the incoming `status` — comparing "before vs after"
+      // on THIS document is unreliable and was the root cause of status
+      // messages never being persisted. We still apply the write here
+      // (harmless/idempotent if REST already did it, and this is the only
+      // path when the socket is used without a preceding REST call), but we
+      // no longer gate message/notification creation on that comparison.
+      const statusActuallyProvided = Boolean(status);
+      const previousStatus = requestItem.status;
+
+      if (status) requestItem.status = status;
+      if (currentLocation !== undefined)
+        requestItem.currentLocation = currentLocation;
+
+      await requestItem.save();
+      console.log(
+        `✅ [pr-update-request-progress] Updated parent request status to: ${
+          status || "unchanged"
+        }, location: ${currentLocation || "unchanged"}`
+      );
+
+      // --- Sync linked requests (same pattern as REST updateRequestProgress) ---
+      const queryIdentifiers = [
+        requestId,
+        requestItem._id.toString(),
+        requestItem.inRideWith,
+        requestItem.assignedTo,
+      ].filter(Boolean);
+
+      const updateFields = {};
+      if (status) updateFields.status = status;
+      if (currentLocation !== undefined)
+        updateFields.currentLocation = currentLocation;
+
+      if (Object.keys(updateFields).length > 0) {
+        console.log(
+          `⏳ [pr-update-request-progress] Syncing linked requests with identifiers:`,
+          queryIdentifiers
+        );
+        const updateResult = await Request.updateMany(
+          {
+            _id: { $ne: requestItem._id },
+            $or: [
+              { inRideWith: { $in: queryIdentifiers } },
+              { assignedTo: { $in: queryIdentifiers } },
+            ],
+          },
+          { $set: updateFields }
+        );
+        console.log(
+          `✅ [pr-update-request-progress] Synced ${updateResult.modifiedCount} linked request(s).`
+        );
+      }
+
+      const cleanNegotiationId = getCleanId(negotiationId);
+
+      // --- Build a readable line so the update shows inline as a chat message ---
+      // FIXED: previously this was `if (status && status !== previousStatus)`,
+      // which is almost always false because the REST call that runs right
+      // before this socket emit has usually already applied the new status
+      // to the DB — so previousStatus === status by the time we read it here.
+      // That meant the "status" message was silently never created/saved.
+      // Now: any explicit status sent by the client always produces a
+      // persisted, broadcast chat message.
+      let systemText = null;
+      if (statusActuallyProvided) {
+        systemText = `Status updated to "${status.replace(/_/g, " ")}"`;
+      }
+      if (currentLocation) {
+        systemText = systemText
+          ? `${systemText} • Location: ${currentLocation}`
+          : `Location updated: ${currentLocation}`;
+      }
+
+      let messageToSend = null;
+
+      if (
+        systemText &&
+        cleanNegotiationId &&
+        mongoose.Types.ObjectId.isValid(cleanNegotiationId)
+      ) {
+        console.log(
+          `⏳ [pr-update-request-progress] Creating inline status message in negotiation chat...`
+        );
+        const newMessage = await NegotiationMessage.create({
+          negotiation: cleanNegotiationId,
+          sender: senderId,
+          text: systemText,
+          type: "status",
+          meta: { status, currentLocation, requestId },
+          isRead: false,
+        });
+
+        const populatedMessage = await newMessage.populate(
+          "sender",
+          "name fullName email profileImage"
+        );
+
+        messageToSend = {
+          id: populatedMessage._id.toString(),
+          negotiation: cleanNegotiationId,
+          sender: populatedMessage.sender,
+          text: populatedMessage.text,
+          type: populatedMessage.type,
+          meta: populatedMessage.meta,
+          isRead: populatedMessage.isRead,
+          readBy: populatedMessage.readBy,
+          timestamp: populatedMessage.createdAt,
+          time: formatMessageTime(populatedMessage.createdAt),
+        };
+
+        // Shows up in the chat feed like any other message, AND — because
+        // it's now actually saved to NegotiationMessage — it will still be
+        // there the next time join-pr-chat re-fetches history on refresh.
+        io.to(cleanNegotiationId).emit("pr-chat-message", messageToSend);
+        console.log(
+          `✅ [pr-update-request-progress] Emitted status as inline chat message to room ${cleanNegotiationId}`
+        );
+      } else {
+        console.log(
+          `⚠️ [pr-update-request-progress] Skipped creating chat message — no systemText or invalid/missing negotiationId.`,
+          { systemText, cleanNegotiationId }
+        );
+      }
+
+      // Lightweight event for screens tracking status/location without chat context
+      io.to(cleanNegotiationId || requestId).emit("request-progress-updated", {
+        requestId: requestItem._id.toString(),
+        status: requestItem.status,
+        currentLocation: requestItem.currentLocation,
+        message: messageToSend,
+      });
+      console.log(
+        `✅ [pr-update-request-progress] Emitted 'request-progress-updated' event.`
+      );
+
+      // --- Push notification on status change ---
+      // FIXED: same root issue as above — `previousStatus !== requestItem.status`
+      // was almost always false. Now fires whenever the client explicitly sent
+      // a status, matching real usage (the client only calls this on deliberate
+      // transitions like "Start Ride" / "Complete Ride" / "Confirm Handover").
+      if (statusActuallyProvided) {
+        console.log(
+          `⏳ [pr-update-request-progress] Status provided. Checking STATUS_COPY for push notification...`
+        );
+        const copy = STATUS_COPY[requestItem.status];
+        if (copy) {
+          sendNotification(requestItem.userId, {
+            title: copy.title,
+            body: copy.body,
+            type: "REQUEST_STATUS_CHANGED",
+            router: "/(screens)/order",
+            data: {
+              requestId: requestItem._id.toString(),
+              requestType: requestItem.type,
+              status: requestItem.status,
+            },
+          })
+            .then(() => {
+              console.log(
+                `✅ [pr-update-request-progress] Push notification sent for status change.`
+              );
+            })
+            .catch((err) =>
+              console.error(
+                "⚠️ [pr-update-request-progress] sendNotification (socket progress update) failed:",
+                err
+              )
+            );
+        } else {
+          console.log(
+            `⚠️ [pr-update-request-progress] No STATUS_COPY found for status: ${requestItem.status}`
+          );
+        }
+      }
+    } catch (error) {
+      console.error(
+        "❌ [pr-update-request-progress] Error updating request progress via socket:",
+        error
+      );
+      socket.emit("error", { message: "Failed to update request progress" });
     }
   });
 
@@ -332,12 +603,20 @@ io.on("connection", (socket) => {
     senderId
   ) => {
     try {
+      console.log(
+        `⏳ [sendChatNotification] Fetching negotiation details for notification...`
+      );
       const negotiationDoc = await Negotiation.findById(negotiationId)
         .populate("negotiator", "fullName")
         .populate("serviceProvider", "fullName")
         .lean();
 
-      if (!negotiationDoc) return;
+      if (!negotiationDoc) {
+        console.error(
+          `❌ [sendChatNotification] Negotiation not found for ID: ${negotiationId}`
+        );
+        return;
+      }
 
       const senderObjectId = new mongoose.Types.ObjectId(senderId);
       let receiverId = null;
@@ -360,6 +639,9 @@ io.on("connection", (socket) => {
           populatedMessage.text.substring(0, 60) +
           (populatedMessage.text.length > 60 ? "..." : "");
 
+        console.log(
+          `⏳ [sendChatNotification] Dispatching push notification to receiver: ${receiverId}`
+        );
         await sendNotification(receiverId, {
           title: "New Message",
           body: `${senderName}: ${messagePreview}`,
@@ -372,21 +654,34 @@ io.on("connection", (socket) => {
             isPriceOffer: populatedMessage.isPriceSet,
           },
         });
+        console.log(
+          `✅ [sendChatNotification] Push notification sent successfully.`
+        );
+      } else {
+        console.log(
+          `⚠️ [sendChatNotification] No valid receiver found to notify.`
+        );
       }
     } catch (err) {
-      console.error("❌ Chat Notification Error:", err);
+      console.error("❌ [sendChatNotification] Chat Notification Error:", err);
     }
   };
 
   // Send notification when price is agreed
   const sendPriceAgreedNotification = async (negotiationId, price) => {
     try {
+      console.log(`⏳ [sendPriceAgreedNotification] Fetching negotiation...`);
       const negotiationDoc = await Negotiation.findById(negotiationId)
         .populate("negotiator", "fullName")
         .populate("serviceProvider", "fullName")
         .lean();
 
-      if (!negotiationDoc) return;
+      if (!negotiationDoc) {
+        console.error(
+          `❌ [sendPriceAgreedNotification] Negotiation not found.`
+        );
+        return;
+      }
 
       // Notify both parties
       const receivers = [
@@ -394,6 +689,9 @@ io.on("connection", (socket) => {
         negotiationDoc.serviceProvider?._id,
       ].filter(Boolean);
 
+      console.log(
+        `⏳ [sendPriceAgreedNotification] Sending to ${receivers.length} receivers...`
+      );
       for (const receiverId of receivers) {
         await sendNotification(receiverId, {
           title: "Price Agreed! 🎉",
@@ -409,56 +707,80 @@ io.on("connection", (socket) => {
           },
         });
       }
+      console.log(
+        `✅ [sendPriceAgreedNotification] Notifications successfully dispatched.`
+      );
     } catch (err) {
-      console.error("❌ Price Agreement Notification Error:", err);
+      console.error(
+        "❌ [sendPriceAgreedNotification] Price Agreement Notification Error:",
+        err
+      );
     }
   };
 
   socket.on("register_user", async ({ userId }) => {
-    if (!userId) return;
+    console.log(
+      `📥 [register_user] Received registration request for user: ${userId}`
+    );
+    if (!userId) {
+      console.error(`❌ [register_user] userId is missing!`);
+      return;
+    }
     try {
       socket.userId = userId;
       const user = await User.findById(userId);
-      if (!user) return;
+      if (!user) {
+        console.error(`❌ [register_user] User not found in DB: ${userId}`);
+        return;
+      }
 
       const wasOffline = !user.socketId;
       user.socketId = socket.id;
       if (wasOffline) user.isOnline = true;
 
       await user.save();
-      console.log(`🟢 User ${userId} registered online`);
+      console.log(
+        `🟢 [register_user] User ${userId} registered online with socket ${socket.id}`
+      );
     } catch (err) {
-      console.error("Error registering user:", err);
+      console.error("❌ [register_user] Error registering user:", err);
     }
   });
+
   socket.on("join_room", async (data) => {
-    console.log("📥 JOIN_ROOM REQUEST:", JSON.stringify(data, null, 2));
+    console.log(
+      "📥 [join_room] REQUEST RECEIVED:",
+      JSON.stringify(data, null, 2)
+    );
 
     const { uuid, userId } = data;
     if (!uuid) {
-      console.log("⚠️ JOIN_ROOM FAILED: Missing uuid");
+      console.log("⚠️ [join_room] FAILED: Missing uuid in payload");
       return;
     }
 
     socket.join(uuid);
-    console.log(`🏠 Socket ${socket.id} joined room: ${uuid}`);
+    console.log(`🏠 [join_room] Socket ${socket.id} joined room: ${uuid}`);
 
     try {
+      console.log(
+        `⏳ [join_room] Marking unread messages as read for receiverId: ${userId} in room: ${uuid}`
+      );
       const updateResult = await Message.updateMany(
         { roomUuid: uuid, receiverId: userId, isRead: false },
         { $set: { isRead: true } }
       );
       console.log(
-        "📖 MESSAGES MARKED READ:",
+        "📖 [join_room] MESSAGES MARKED READ:",
         JSON.stringify(updateResult, null, 2)
       );
 
+      console.log(`⏳ [join_room] Fetching message history...`);
       const history = await Message.find({ roomUuid: uuid })
         .sort({ timestamp: 1 })
         .lean();
 
       const mappedHistory = history.map((msg) => {
-        // Logic to ensure images and voice notes have their URLs mapped correctly
         const isImage = msg.messageType === "image";
         const isVoice = msg.messageType === "voice";
 
@@ -472,12 +794,10 @@ io.on("connection", (socket) => {
             : new Date().toISOString(),
           messageType: msg.messageType || "text",
 
-          // Validation: If it's an image, we try to find the URL in imageuri or mediaUri
           imageuri: isImage
             ? msg.imageuri || msg.mediaUri || undefined
             : undefined,
 
-          // Validation: Same logic for voice notes
           audioUri: isVoice
             ? msg.audioUri || msg.mediaUri || undefined
             : undefined,
@@ -488,7 +808,6 @@ io.on("connection", (socket) => {
         };
       });
 
-      // --- CRITICAL VALIDATION LOG ---
       const imageStatus = mappedHistory
         .filter((m) => m.messageType === "image")
         .map((img) => ({
@@ -499,21 +818,34 @@ io.on("connection", (socket) => {
 
       if (imageStatus.length > 0) {
         console.log(
-          "🖼️ IMAGE HISTORY VALIDATION:",
+          "🖼️ [join_room] IMAGE HISTORY VALIDATION:",
           JSON.stringify(imageStatus, null, 2)
         );
       }
 
-      console.log(`📤 LOAD_MESSAGES (Count: ${mappedHistory.length})`);
+      console.log(
+        `📤 [join_room] EMITTING LOAD_MESSAGES (Count: ${mappedHistory.length}) to socket.`
+      );
       socket.emit("load_messages", mappedHistory);
 
       const readUpdate = { roomUuid: uuid, readerId: userId };
       io.to(uuid).emit("messages_marked_read", readUpdate);
+      console.log(
+        `✅ [join_room] Broadcasted 'messages_marked_read' to room: ${uuid}`
+      );
     } catch (err) {
-      console.error("❌ Error joining room:", err);
+      console.error("❌ [join_room] Error joining room:", err);
     }
   });
+
   socket.on("send_message", async (data) => {
+    console.log(
+      "📥 [send_message] Received message payload from:",
+      data.userId,
+      "to room:",
+      data.uuid
+    );
+
     const {
       uuid: roomUuid,
       message: textMessage,
@@ -528,6 +860,7 @@ io.on("connection", (socket) => {
     } = data;
 
     if (!roomUuid || !senderId || !receiverId || !messageUuid) {
+      console.error(`❌ [send_message] Missing required fields in payload.`);
       return socket.emit("error", { message: "Missing required fields" });
     }
 
@@ -537,6 +870,9 @@ io.on("connection", (socket) => {
         audioUri = "";
 
       if (base64Media && messageType !== "text") {
+        console.log(
+          `⏳ [send_message] Processing base64 media upload for type: ${messageType}...`
+        );
         const parts = base64Media.split(";base64,");
         const base64Data = parts.length > 1 ? parts.pop() : parts[0];
         const fileBuffer = Buffer.from(base64Data, "base64");
@@ -545,7 +881,6 @@ io.on("connection", (socket) => {
         const extension = extensionMap[messageType] || "bin";
         const fileName = `${messageType}s/${messageUuid}.${extension}`;
 
-        // UPLOAD TO BACKBLAZE
         const uploadedUrl = await uploadToBackblaze(
           fileBuffer,
           fileName,
@@ -556,9 +891,8 @@ io.on("connection", (socket) => {
         else if (messageType === "video") videouri = uploadedUrl;
         else if (messageType === "voice") audioUri = uploadedUrl;
 
-        // Log media upload success
         console.log(
-          "✅ MEDIA UPLOADED:",
+          "✅ [send_message] MEDIA UPLOADED:",
           JSON.stringify(
             {
               messageType,
@@ -571,6 +905,7 @@ io.on("connection", (socket) => {
         );
       }
 
+      console.log(`⏳ [send_message] Saving new general chat message to DB...`);
       const newMessage = new Message({
         roomUuid,
         message: textMessage || getDefaultMessage(messageType),
@@ -589,6 +924,7 @@ io.on("connection", (socket) => {
       });
 
       await newMessage.save();
+      console.log(`✅ [send_message] Message saved with ID: ${newMessage._id}`);
 
       const messageToSend = {
         uuid: messageUuid,
@@ -603,14 +939,19 @@ io.on("connection", (socket) => {
         duration: newMessage.duration,
       };
 
-      // DEBUG LOG: Verify the full object being sent to frontend
       console.log(
-        "📤 OUTGOING MESSAGE:",
+        "📤 [send_message] OUTGOING MESSAGE PAYLOAD:",
         JSON.stringify(messageToSend, null, 2)
       );
 
       io.to(roomUuid).emit("receive_message", messageToSend);
+      console.log(
+        `✅ [send_message] Broadcasted 'receive_message' to room: ${roomUuid}`
+      );
 
+      console.log(
+        `⏳ [send_message] Calculating unread count for receiver: ${receiverId}...`
+      );
       const unreadCount = await Message.countDocuments({
         receiverId,
         isRead: false,
@@ -621,26 +962,47 @@ io.on("connection", (socket) => {
         unreadCount,
         lastMessage: newMessage.message,
       });
+      console.log(
+        `✅ [send_message] Broadcasted 'unread_update' with count: ${unreadCount}`
+      );
     } catch (err) {
-      console.error("❌ Error processing voice/media message:", err);
+      console.error(
+        "❌ [send_message] Error processing voice/media message:",
+        err
+      );
       socket.emit("message_error", {
         messageUuid,
-        error: "Media upload failed",
+        error: "Media upload failed or message processing error",
       });
     }
   });
+
   // 4. Edit Message
   socket.on(
     "edit_message",
     async ({ uuid, messageUuid, newMessage, userId }) => {
+      console.log(
+        `📥 [edit_message] Received edit request for message: ${messageUuid} from user: ${userId}`
+      );
       try {
         const msg = await Message.findOne({ messageUuid, senderId: userId });
-        if (!msg) return socket.emit("error", { message: "Access denied" });
+        if (!msg) {
+          console.error(
+            `❌ [edit_message] Message not found or access denied.`
+          );
+          return socket.emit("error", { message: "Access denied" });
+        }
 
         const minutesPassed =
           (Date.now() - new Date(msg.timestamp).getTime()) / 60000;
-        if (minutesPassed > 5)
+        if (minutesPassed > 5) {
+          console.error(
+            `❌ [edit_message] Time limit exceeded. (${minutesPassed.toFixed(
+              2
+            )} mins)`
+          );
           return socket.emit("error", { message: "Time limit exceeded" });
+        }
 
         msg.message = newMessage.trim();
         await msg.save();
@@ -649,8 +1011,11 @@ io.on("connection", (socket) => {
           uuid: messageUuid,
           newMessage: msg.message,
         });
+        console.log(
+          `✅ [edit_message] Message edited and broadcasted successfully: ${messageUuid}`
+        );
       } catch (err) {
-        console.error("Edit failed:", err);
+        console.error("❌ [edit_message] Edit failed:", err);
       }
     }
   );
@@ -659,39 +1024,49 @@ io.on("connection", (socket) => {
   socket.on(
     "delete_message",
     async ({ uuid, messageUuid, userId, forEveryone }) => {
+      console.log(
+        `📥 [delete_message] Request to delete message: ${messageUuid} (forEveryone: ${forEveryone})`
+      );
       try {
         const msg = await Message.findOne({ messageUuid });
-        if (!msg) return;
+        if (!msg) {
+          console.error(
+            `❌ [delete_message] Message not found: ${messageUuid}`
+          );
+          return;
+        }
 
         if (forEveryone && msg.senderId === userId) {
           await Message.deleteOne({ messageUuid });
           io.to(uuid).emit("message_deleted", { uuid: messageUuid });
+          console.log(
+            `✅ [delete_message] Message deleted for everyone in room: ${uuid}`
+          );
         } else {
           socket.emit("message_deleted", { uuid: messageUuid });
+          console.log(
+            `✅ [delete_message] Message deleted locally for socket: ${socket.id}`
+          );
         }
       } catch (err) {
-        console.error("Delete failed:", err);
+        console.error("❌ [delete_message] Delete failed:", err);
       }
     }
   );
 
   socket.on("get_conversations", async ({ userId }) => {
+    console.log(
+      `📥 [get_conversations] Fetching inbox conversations for user: ${userId}`
+    );
     try {
       const conversations = await Message.aggregate([
-        // 1. Filter messages involving the current user
         { $match: { $or: [{ senderId: userId }, { receiverId: userId }] } },
-
-        // 2. Sort by newest first
         { $sort: { timestamp: -1 } },
-
-        // 3. Group by the Room
         {
           $group: {
             _id: "$roomUuid",
             lastMessage: { $first: "$message" },
             timestamp: { $first: "$timestamp" },
-
-            // ID of the person who is NOT you
             otherPersonId: {
               $first: {
                 $cond: [
@@ -701,10 +1076,8 @@ io.on("connection", (socket) => {
                 ],
               },
             },
-
             latestSenderName: { $first: "$senderName" },
             profilePicture: { $first: "$receiverProfilePicture" },
-
             unreadCount: {
               $sum: {
                 $cond: [
@@ -721,15 +1094,11 @@ io.on("connection", (socket) => {
             },
           },
         },
-
-        // 4. Convert string ID to ObjectId for lookup
         {
           $addFields: {
             otherPersonObjectId: { $toObjectId: "$otherPersonId" },
           },
         },
-
-        // 5. Lookup the Other Person's details
         {
           $lookup: {
             from: "users",
@@ -738,15 +1107,12 @@ io.on("connection", (socket) => {
             as: "userDetails",
           },
         },
-
         {
           $unwind: {
             path: "$userDetails",
             preserveNullAndEmptyArrays: true,
           },
         },
-
-        // 6. Project Final Shape - REMOVED "Family Member" check
         {
           $project: {
             _id: 1,
@@ -756,8 +1122,6 @@ io.on("connection", (socket) => {
             profilePicture: 1,
             senderId: "$otherPersonId",
             receiverId: { $literal: userId },
-
-            // ALWAYS return the other person's real name from the User collection
             senderName: {
               $cond: [
                 { $ifNull: ["$userDetails", false] },
@@ -768,27 +1132,36 @@ io.on("connection", (socket) => {
                     "$userDetails.lastName",
                   ],
                 },
-                "$latestSenderName", // Fallback if user document is missing
+                "$latestSenderName",
               ],
             },
           },
         },
-
         { $sort: { timestamp: -1 } },
       ]);
 
       console.log(
-        "📂 UPDATED INBOX DATA:",
+        "📂 [get_conversations] UPDATED INBOX DATA EXTRACTED SUCCESSFULLY:",
         JSON.stringify(conversations, null, 2)
       );
 
       socket.emit("conversations_list", conversations);
+      console.log(
+        `✅ [get_conversations] Emitted 'conversations_list' to socket ${socket.id}`
+      );
     } catch (err) {
-      console.error("❌ Error fetching conversations:", err);
+      console.error(
+        "❌ [get_conversations] Error fetching conversations:",
+        err
+      );
     }
   });
+
   // 6. Typing Indicators
   socket.on("typing", (data) => {
+    console.log(
+      `💬 [typing] User ${data.fullName} is typing in room: ${data.uuid}`
+    );
     socket.to(data.uuid).emit("user_typing", {
       roomUuid: data.uuid,
       name: data.fullName,
@@ -797,55 +1170,51 @@ io.on("connection", (socket) => {
   });
 
   socket.on("stop_typing", (data) => {
+    console.log(`💬 [stop_typing] User stopped typing in room: ${data.uuid}`);
     socket
       .to(data.uuid)
       .emit("user_typing", { roomUuid: data.uuid, isTyping: false });
   });
 
   socket.on("start_call", async ({ to, offer, fromName, fromId }) => {
-    // 1. Immediate Signaling (for users currently in the app)
+    console.log(
+      `📞 [start_call] Call initiated from: ${fromId} (${fromName}) to socket/room: ${to}`
+    );
     io.to(to).emit("incoming_call", { offer, fromName, fromId });
-
-    // await sendPushNotificationToUser(to, {
-    //   title: "Incoming Call",
-    //   body: `${fromName} is calling you...`,
-    //   router: "/calls/CallScreen", // Or wherever your call UI is
-    //   data: {
-    //     type: "VOIP_CALL",
-    //     offer,
-    //     fromName,
-    //     fromId,
-    //   },
-    // });
   });
 
-  // 2. User answers a call
   socket.on("answer_call", ({ to, answer }) => {
+    console.log(`📞 [answer_call] Call answered, sending answer to: ${to}`);
     io.to(to).emit("call_answered", { answer });
   });
 
-  // 3. Exchange ICE Candidates (Network info)
   socket.on("ice_candidate", ({ to, candidate }) => {
+    console.log(`❄️ [ice_candidate] Relaying ICE Candidate to: ${to}`);
     io.to(to).emit("ice_candidate", { candidate });
   });
 
-  // 4. Hang up
   socket.on("end_call", ({ to }) => {
+    console.log(`🛑 [end_call] Ending call, notifying: ${to}`);
     io.to(to).emit("call_ended");
   });
 
   // 8. Disconnect Handler
   socket.on("disconnect", async () => {
+    console.log(`🔌 [disconnect] Socket disconnected: ${socket.id}`);
     try {
       const user = await User.findOne({ socketId: socket.id });
       if (user) {
         user.socketId = null;
         user.isOnline = false;
         await user.save();
-        console.log(`🔴 User ${user._id} offline`);
+        console.log(`🔴 [disconnect] User ${user._id} marked offline in DB`);
+      } else {
+        console.log(
+          `⚠️ [disconnect] Socket ${socket.id} disconnected but no linked user was found in DB.`
+        );
       }
     } catch (err) {
-      console.error("Disconnect error:", err);
+      console.error("❌ [disconnect] Disconnect database error:", err);
     }
   });
 });
@@ -853,10 +1222,10 @@ io.on("connection", (socket) => {
 // --- DATABASE & SERVER START ---
 mongoose
   .connect(process.env.MONGODB_URI)
-  .then(() => console.log("🟢 MongoDB Connected"))
-  .catch((err) => console.error("🔴 MongoDB Error:", err));
+  .then(() => console.log("🟢 [Server] MongoDB Connected Successfully"))
+  .catch((err) => console.error("🔴 [Server] MongoDB Connection Error:", err));
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 [Server] Kindred Auth Server running on port ${PORT}`);
 });

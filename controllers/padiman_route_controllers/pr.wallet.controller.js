@@ -1,116 +1,268 @@
+const mongoose = require("mongoose");
 const { Wallet } = require("../../models/padiman_route_models/Wallet");
 const Request = require("../../models/padiman_route_models/Request");
+const Negotiation = require("../../models/padiman_route_models/Negotiation");
 const axios = require("axios");
 const { sendNotification } = require("../../utils/pr/pr_push");
 
 const PAYSTACK_HEADERS = {
   Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-  "Content-Type": "application/json",
+  "Content-Type": "json",
 };
 
-// 1. Get User Wallet (With Auto Escrow Release)
-exports.getWallet = async (req, res) => {
-  console.log(
-    `🔍 [GET WALLET START] Fetching wallet for User ID: ${
-      req.user.id || req.user
-    }`
+// ====================== STRICT OBJECT ID VALIDATOR ======================
+const isStrictObjectId = (id) => {
+  if (!id) return true;
+  return /^[0-9a-fA-F]{24}$/.test(id.toString());
+};
+
+// ====================== HELPER: SAFE NEGOTIATION & SERVICE FILTERING ======================
+const attachNegotiationsToEarnings = async (earnings) => {
+  if (!earnings || earnings.length === 0) return earnings;
+
+  // Enforce strict check before pushing to the array
+  const negotiationIds = [
+    ...new Set(
+      earnings
+        .filter((e) => e.negotiationId && isStrictObjectId(e.negotiationId))
+        .map((e) => e.negotiationId.toString())
+    ),
+  ];
+
+  if (negotiationIds.length === 0) return earnings;
+
+  // 1. Fetch negotiations safely without populating bad reference fields
+  const populatedNegotiations = await Negotiation.find({
+    _id: { $in: negotiationIds },
+  })
+    .populate("negotiator", "-password -__v")
+    .populate("serviceProvider", "-password -__v")
+    .lean();
+
+  // 2. Extract valid Request IDs from 'service' and 'negotiatorService'
+  const validRequestIds = [];
+
+  populatedNegotiations.forEach((neg) => {
+    if (neg.service) {
+      const sId = neg.service.toString();
+      if (isStrictObjectId(sId)) {
+        validRequestIds.push(sId);
+      } else {
+        neg.service = null;
+      }
+    }
+
+    if (neg.negotiatorService) {
+      const nsId = neg.negotiatorService.toString();
+      if (isStrictObjectId(nsId)) {
+        validRequestIds.push(nsId);
+      } else {
+        neg.negotiatorService = null;
+      }
+    }
+  });
+
+  // 3. Manually fetch the valid Requests
+  let requestMap = new Map();
+  if (validRequestIds.length > 0) {
+    const requests = await Request.find({
+      _id: { $in: validRequestIds },
+    }).lean();
+    requestMap = new Map(requests.map((r) => [r._id.toString(), r]));
+  }
+
+  // 4. Attach fetched Requests back to the negotiations
+  populatedNegotiations.forEach((neg) => {
+    if (neg.service && isStrictObjectId(neg.service.toString())) {
+      neg.service = requestMap.get(neg.service.toString()) || null;
+    }
+    if (
+      neg.negotiatorService &&
+      isStrictObjectId(neg.negotiatorService.toString())
+    ) {
+      neg.negotiatorService =
+        requestMap.get(neg.negotiatorService.toString()) || null;
+    }
+  });
+
+  const negotiationMap = new Map(
+    populatedNegotiations.map((neg) => [neg._id.toString(), neg])
   );
+
+  // 5. Map earnings and ENSURE we drop any item where the negotiation has NO valid service object
+  const processedEarnings = earnings.map((earning) => {
+    if (earning.negotiationId && isStrictObjectId(earning.negotiationId)) {
+      const negotiation =
+        negotiationMap.get(earning.negotiationId.toString()) || null;
+
+      return {
+        ...earning,
+        negotiation,
+      };
+    }
+    return earning;
+  });
+
+  // FILTER OUT: Drop any earning tied to a negotiation that lacks a valid service/negotiatorService object
+  return processedEarnings.filter((earning) => {
+    // If it's a direct wallet funding / non-negotiation earning, keep it
+    if (!earning.negotiationId) return true;
+
+    const neg = earning.negotiation;
+    // If negotiation document doesn't exist or doesn't have a valid service object, filter it out completely
+    if (!neg) return false;
+    const hasValidService = neg.service || neg.negotiatorService;
+    return Boolean(hasValidService);
+  });
+};
+
+// ====================== 1. GET WALLET (Main) ======================
+exports.getWallet = async (req, res) => {
+  console.log(`🔍 [GET WALLET START] User ID: ${req.user.id || req.user}`);
 
   try {
     const userId = req.user.id || req.user;
-    console.log(`📝 [DB QUERY] Finding wallet with: { user: '${userId}' }`);
 
-    const wallet = await Wallet.findOne({ user: userId });
+    let wallet = await Wallet.findOne({ user: userId });
 
     if (!wallet) {
-      console.log(
-        `⚠️ [WALLET NOT FOUND] No wallet record exists for User: ${userId}`
-      );
       return res.status(404).json({ message: "Wallet not found" });
     }
 
-    // =========================================================================
-    // ESCROW AUTO-RELEASE LOGIC
-    // Check pending earnings to see if their requests have been confirmed
-    // =========================================================================
+    // ==================== CLEANUP: DEEP REMOVE CORRUPT EARNINGS ====================
+    const originalEarningsCount = wallet.earnings.length;
+
+    wallet.earnings = wallet.earnings.filter((earning) => {
+      const sId = earning.serviceId ? earning.serviceId.toString() : null;
+      const nId = earning.negotiationId
+        ? earning.negotiationId.toString()
+        : null;
+      const pId = earning.payment ? earning.payment.toString() : null;
+      const eId = earning._id ? earning._id.toString() : null;
+
+      const badString = "Parcel Delivery Negotiation";
+
+      if (
+        sId === badString ||
+        nId === badString ||
+        pId === badString ||
+        eId === badString
+      ) {
+        return false;
+      }
+
+      if (sId && !isStrictObjectId(sId)) return false;
+      if (nId && !isStrictObjectId(nId)) return false;
+      if (pId && !isStrictObjectId(pId)) return false;
+
+      return true;
+    });
+
+    if (wallet.earnings.length !== originalEarningsCount) {
+      console.warn(
+        `⚠️ [WALLET CLEANUP] Removed ${
+          originalEarningsCount - wallet.earnings.length
+        } corrupt earning(s).`
+      );
+      await wallet.save();
+    }
+    // ============================================================
+
+    // ==================== ESCROW AUTO-RELEASE ====================
     let requiresSave = false;
 
-    if (wallet.earnings && wallet.earnings.length > 0) {
-      for (const earning of wallet.earnings) {
-        // Target earnings that are currently held in escrow
-        if (earning.status === "pending" || earning.status === "escrow") {
-          let associatedRequest = null;
+    for (const earning of wallet.earnings) {
+      if (earning.status === "pending" || earning.status === "escrow") {
+        let associatedRequest = null;
 
-          // Attempt to locate the request via serviceId or negotiationId
-          if (earning.serviceId) {
-            associatedRequest = await Request.findById(earning.serviceId);
-          } else if (earning.negotiationId) {
-            associatedRequest = await Request.findOne({
-              negotiation: earning.negotiationId,
-            });
-          }
+        if (earning.serviceId && isStrictObjectId(earning.serviceId)) {
+          associatedRequest = await Request.findById(earning.serviceId);
+        } else if (
+          earning.negotiationId &&
+          isStrictObjectId(earning.negotiationId)
+        ) {
+          associatedRequest = await Request.findOne({
+            negotiation: earning.negotiationId,
+          });
+        }
 
-          // If the request is confirmed, clear the funds from escrow
-          if (associatedRequest && associatedRequest.status === "confirmed") {
-            earning.status = "success";
+        if (associatedRequest && associatedRequest.status === "confirmed") {
+          earning.status = "success";
+          if (typeof wallet.withdrawableBalance !== "number")
+            wallet.withdrawableBalance = 0;
 
-            // Ensure withdrawable balance is initialized if it's somehow missing
-            if (typeof wallet.withdrawableBalance !== "number") {
-              wallet.withdrawableBalance = 0;
-            }
-
-            wallet.balance += earning.amount;
-            wallet.withdrawableBalance += earning.amount;
-            requiresSave = true;
-
-            console.log(
-              `✅ [ESCROW AUTO-RELEASE] ₦${earning.amount} cleared to balance from confirmed request ${associatedRequest._id}.`
-            );
-          }
+          wallet.balance += earning.amount;
+          wallet.withdrawableBalance += earning.amount;
+          requiresSave = true;
         }
       }
     }
 
-    if (requiresSave) {
-      await wallet.save();
-    }
-    // =========================================================================
+    if (requiresSave) await wallet.save();
+    // ============================================================
 
-    console.log("✅ [GET WALLET SUCCESS] Wallet found and escrow synced.");
-    res.status(200).json(wallet);
+    // ==================== ATTACH & FILTER EARNINGS ====================
+    const walletObj = wallet.toObject();
+    walletObj.earnings = await attachNegotiationsToEarnings(walletObj.earnings);
+    // ============================================================
+
+    console.log("✅ [GET WALLET SUCCESS] Wallet with full details returned.");
+
+    return res.status(200).json({
+      success: true,
+      wallet: walletObj,
+    });
   } catch (error) {
-    console.error("💥 [GET WALLET CRITICAL ERROR]:", error.message);
-    res
-      .status(500)
-      .json({ message: "Error fetching wallet", error: error.message });
+    console.error("💥 [GET WALLET ERROR]:", error.message);
+    return res.status(500).json({
+      message: "Error fetching wallet",
+      error: error.message,
+    });
   }
 };
 
-// 2. Get Earnings History
+// ====================== 2. GET EARNINGS HISTORY ======================
 exports.getEarnings = async (req, res) => {
   try {
     const userId = req.user.id || req.user;
-    const wallet = await Wallet.findOne({ user: userId }, "earnings").populate(
-      "earnings.payment earnings.negotiationId earnings.serviceId"
-    );
-    res.status(200).json(wallet.earnings);
+
+    const wallet = await Wallet.findOne({ user: userId });
+
+    if (!wallet) {
+      return res.status(404).json({ message: "Wallet not found" });
+    }
+
+    const walletObj = wallet.toObject();
+    const earnings = await attachNegotiationsToEarnings(walletObj.earnings);
+
+    res.status(200).json({
+      success: true,
+      earnings,
+    });
   } catch (error) {
-    res.status(500).json({ message: "Error fetching earnings", error });
+    console.error("Get Earnings Error:", error);
+    res
+      .status(500)
+      .json({ message: "Error fetching earnings", error: error.message });
   }
 };
 
-// 3. Get Withdrawal History
+// ====================== 3. GET WITHDRAWALS ======================
 exports.getWithdrawals = async (req, res) => {
   try {
     const userId = req.user.id || req.user;
     const wallet = await Wallet.findOne({ user: userId }, "withdrawals");
-    res.status(200).json(wallet.withdrawals);
+    res
+      .status(200)
+      .json({ success: true, withdrawals: wallet?.withdrawals || [] });
   } catch (error) {
-    res.status(500).json({ message: "Error fetching withdrawals", error });
+    res
+      .status(500)
+      .json({ message: "Error fetching withdrawals", error: error.message });
   }
 };
 
-// 4. List Banks (From Paystack)
+// ====================== 4. LIST BANKS ======================
 exports.getBankList = async (req, res) => {
   try {
     const response = await axios.get(
@@ -125,7 +277,7 @@ exports.getBankList = async (req, res) => {
   }
 };
 
-// 5. Request a Withdrawal
+// ====================== 5. REQUEST A WITHDRAWAL ======================
 exports.requestWithdrawal = async (req, res) => {
   const { amount, bankDetails } = req.body;
   const targetUserId = req.user?.id || req.user;
@@ -151,7 +303,6 @@ exports.requestWithdrawal = async (req, res) => {
     wallet.balance -= amount;
     wallet.withdrawableBalance -= amount;
 
-    // Matches the new schema's withdrawals array perfectly
     const withdrawalEntry = {
       amount,
       bankDetails: {
@@ -172,8 +323,8 @@ exports.requestWithdrawal = async (req, res) => {
         title: "Withdrawal Queued ⏳",
         body: `Your withdrawal request of ₦${amount.toLocaleString()} is processing and has been queued.`,
         type: "WITHDRAWAL",
-        router: "/(tabs)/wallet",
         data: {
+          router: "/(tabs)/wallet",
           withdrawalId: savedWithdrawal?._id
             ? savedWithdrawal._id.toString()
             : null,
@@ -201,7 +352,7 @@ exports.requestWithdrawal = async (req, res) => {
   }
 };
 
-// 6. Initialize Wallet Funding
+// ====================== 6. INITIALIZE FUNDING ======================
 exports.initializeFunding = async (req, res) => {
   console.log("=== INITIALIZE FUNDING CONTROLLER STARTED ===");
   const { amount, email } = req.body;
@@ -225,7 +376,7 @@ exports.initializeFunding = async (req, res) => {
   }
 };
 
-// 7. Verify Payment & Top-up Wallet
+// ====================== 7. VERIFY AND TOP UP ======================
 exports.verifyAndTopUp = async (req, res) => {
   console.log("=== VERIFY AND TOP UP CONTROLLER STARTED ===");
   const { reference } = req.params;
@@ -265,11 +416,9 @@ exports.verifyAndTopUp = async (req, res) => {
 
     const amountAdded = transaction.amount / 100;
 
-    // Add funds to both total balance and withdrawable balance since it's a direct user top-up
     wallet.balance += amountAdded;
     wallet.withdrawableBalance += amountAdded;
 
-    // Matches the newly added properties inside the schema's earnings array
     wallet.earnings.push({
       amount: amountAdded,
       source: "Wallet Funding",
@@ -293,7 +442,8 @@ exports.verifyAndTopUp = async (req, res) => {
   }
 };
 
-// 8. Resolve Account
+
+// ====================== 8. RESOLVE ACCOUNT ======================
 exports.resolveAccount = async (req, res) => {
   const { accountNumber, bankCode } = req.body;
 

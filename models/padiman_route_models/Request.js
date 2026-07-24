@@ -78,6 +78,7 @@ const requestSchema = new mongoose.Schema(
       type: String,
       enum: [
         "pending",
+        "talking",
         "assigned",
         "in_progress",
         "completed",

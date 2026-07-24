@@ -9,13 +9,13 @@ const { sendNotification } = require("../../utils/pr/pr_push");
  */
 exports.createNegotiation = async (req, res) => {
   try {
-    const { 
-      serviceProvider, 
-      service,            // The user's current request
-      negotiatorService,  // The matched request found
-      serviceType, 
+    const {
+      serviceProvider,
+      service, // The user's current request
+      negotiatorService, // The matched request found
+      serviceType,
       negotiatorServiceType,
-      negotiator: bodyNegotiator
+      negotiator: bodyNegotiator,
     } = req.body;
 
     const negotiator = bodyNegotiator || req.user?._id || req.user?.id;
@@ -66,7 +66,7 @@ exports.createNegotiation = async (req, res) => {
     if (requestIdsToUpdate.length > 0) {
       await Request.updateMany(
         { _id: { $in: requestIdsToUpdate } },
-        { $set: { negotiation: negotiation._id } }
+        { $set: { negotiation: negotiation._id, status: "talking" } }
       );
     }
 
@@ -119,8 +119,14 @@ exports.getNegotiationById = async (req, res) => {
     const { id } = req.params;
 
     const negotiation = await Negotiation.findById(id)
-      .populate("negotiator", "firstName lastName name fullName email profileImage profilePicture")
-      .populate("serviceProvider", "firstName lastName name fullName email profileImage profilePicture")
+      .populate(
+        "negotiator",
+        "firstName lastName name fullName email profileImage profilePicture"
+      )
+      .populate(
+        "serviceProvider",
+        "firstName lastName name fullName email profileImage profilePicture"
+      )
       .populate("service")
       .populate("negotiatorService");
 

@@ -13,43 +13,28 @@ const NegotiationMessageSchema = new mongoose.Schema(
       ref: "PadimanRouteUser",
       required: true,
     },
-    UUID: {
+    UUID: { type: String },
+    text: { type: String, required: true, trim: true, maxlength: 2000 },
+    attachments: [{ type: String, default: [] }],
+    isRead: { type: Boolean, default: false },
+    isPriceSet: { type: Boolean, default: false },
+    readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "PadimanRouteUser" }],
+    price: { type: Number, default: 0 },
+
+    // NEW — lets a message represent a status/location update instead of plain text
+    type: {
       type: String,
+      enum: ["text", "status", "price", "system"],
+      default: "text",
     },
-    text: {
-      type: String,
-      required: true,
-      trim: true,
-      maxlength: 2000,
-    },
-    attachments: [
-      {
-        type: String,
-        default: [],
-      },
-    ],
-    isRead: {
-      type: Boolean,
-      default: false,
-    },
-    isPriceSet: {
-      type: Boolean,
-      default: false,
-    },
-    readBy: [
-      {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "PadimanRouteUser",
-      },
-    ],
-    price: {
-      type: Number,
-      default: 0,
+    meta: {
+      type: Object,
+      default: {},
     },
   },
   { timestamps: true }
 );
-// Indexes for fast queries
+
 NegotiationMessageSchema.index({ negotiation: 1, createdAt: -1 });
 
 module.exports = mongoose.model("NegotiationMessage", NegotiationMessageSchema);

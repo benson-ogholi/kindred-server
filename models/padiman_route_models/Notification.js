@@ -30,7 +30,8 @@ const notificationSchema = new mongoose.Schema(
         "WITHDRAWAL",
         "MESSAGE",
         "REQUEST_CREATED",
-        "REQUEST_STATUS_CHANGED"
+        "REQUEST_STATUS_CHANGED",
+        "NEGOTIATION_STARTED"
       ],
       default: "GENERAL",
     },
