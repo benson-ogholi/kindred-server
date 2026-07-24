@@ -56,26 +56,36 @@ exports.registerUser = async (req, res) => {
 exports.loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await Padiman_Route_User.findOne({ email });
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and password are required",
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const user = await Padiman_Route_User.findOne({ email: normalizedEmail });
 
     // 1. Validate credentials
     if (!user || !(await user.comparePassword(password))) {
-      console.warn(`[AUTH] Failed login attempt: ${email}`);
+      console.warn(`[AUTH] Failed login attempt: ${normalizedEmail}`);
       return res
-        .status(401)
+        .status(500) // was 402 (Payment Required) — should be 401 (Unauthorized)
         .json({ success: false, message: "Invalid credentials" });
     }
 
     // 2. Check if user is verified
     if (!user.isVerified) {
-      console.warn(`[AUTH] Login attempted by unverified user: ${email}`);
+      console.warn(
+        `[AUTH] Login attempted by unverified user: ${normalizedEmail}`
+      );
 
-      // Optional: Auto-trigger a new OTP if they haven't verified yet
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      await PR_Otp.deleteMany({ email });
-      await PR_Otp.create({ email, otp });
+      await PR_Otp.deleteMany({ email: normalizedEmail });
+      await PR_Otp.create({ email: normalizedEmail, otp });
       await sendPrEmail(
-        email,
+        normalizedEmail,
         "Verify your account",
         `Your new verification code is ${otp}.`
       );
@@ -88,21 +98,21 @@ exports.loginUser = async (req, res) => {
     }
 
     // 3. Proceed with successful login
-    console.log(`[AUTH] User login: ${email}. Sending Notification...`);
+    console.log(
+      `[AUTH] User login: ${normalizedEmail}. Sending notification...`
+    );
     await sendPrEmail(
-      email,
+      normalizedEmail,
       "New Login Detected",
       `Hi ${user.fullName}, we detected a new login to your Padiman Route account.`
     );
-    // 3. Generate Token
+
     const token = generateToken(user._id);
+    console.log(`[AUTH] User login success: ${normalizedEmail}.`);
 
-    // 4. Success Response with Token
-    console.log(`[AUTH] User login: ${email}.`);
-
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      token, // Send token to client
+      token,
       user: {
         id: user._id,
         _id: user._id,
@@ -112,7 +122,7 @@ exports.loginUser = async (req, res) => {
     });
   } catch (error) {
     console.error(`[ERROR] Login failure: ${error.message}`);
-    res.status(500).json({ success: false, message: error.message });
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -121,37 +131,55 @@ exports.sendOtp = async (req, res) => {
     const { email } = req.body;
 
     // 1. Validate that the email exists in the request body
-    if (!email || typeof email !== 'string' || !email.includes('@')) {
-      console.warn(`[AUTH] Send OTP rejected: Invalid or missing email address.`);
-      return res.status(400).json({ 
-        success: false, 
-        message: "Please provide a valid email address." 
+    if (!email || typeof email !== "string" || !email.includes("@")) {
+      console.warn(
+        `[AUTH] Send OTP rejected: Invalid or missing email address.`
+      );
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid email address.",
       });
     }
 
-    // 2. Generate numeric OTP string
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // 2. Only send OTPs to users who actually exist
+    const user = await Padiman_Route_User.findOne({ email: normalizedEmail });
+    if (!user) {
+      console.warn(
+        `[AUTH] Send OTP rejected: No account found for ${normalizedEmail}`
+      );
+      return res.status(404).json({
+        success: false,
+        message: "No account found with that email address.",
+      });
+    }
+
+    // 3. Generate numeric OTP string
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
-    // 3. Clear any existing OTPs for this email and create the new one
-    await PR_Otp.deleteMany({ email });
-    await PR_Otp.create({ email, otp });
+    // 4. Clear any existing OTPs for this email and create the new one
+    await PR_Otp.deleteMany({ email: normalizedEmail });
+    await PR_Otp.create({ email: normalizedEmail, otp });
 
-    console.log(`[AUTH] OTP generated for ${email}. Sending email...`);
+    console.log(`[AUTH] OTP generated for ${normalizedEmail}. Sending email...`);
 
-    // 4. Send the verification email
+    // 5. Send the verification email
     await sendPrEmail(
-      email,
+      normalizedEmail,
       "Verification Code",
       `Your verification code is ${otp}`
     );
 
-    return res.status(200).json({ success: true, message: "OTP sent successfully." });
-
+    return res
+      .status(200)
+      .json({ success: true, message: "OTP sent successfully." });
   } catch (error) {
     console.error(`[ERROR] Send OTP failure: ${error.message}`);
-    return res
-      .status(500)
-      .json({ success: false, message: "An error occurred while processing your request." });
+    return res.status(500).json({
+      success: false,
+      message: "An error occurred while processing your request.",
+    });
   }
 };
 
