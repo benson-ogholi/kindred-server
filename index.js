@@ -5,7 +5,7 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
-
+const RequestingMessage = require("./models/padiman_utility_models/RequestingMessage");
 const authRoutes = require("./routes/auth");
 const familiesRoutes = require("./routes/family");
 const featuresRoutes = require("./routes/features");
@@ -48,10 +48,14 @@ const pru_asset = require("./routes/padiman_utility/asset");
 const pru_sales = require("./routes/padiman_utility/sale");
 const pru_found = require("./routes/padiman_utility/lostAndFound");
 const pr_requests = require("./routes/pr/pr.request.router");
-
-// NEW — needed for pr-update-request-progress
-const Request = require("./models/padiman_route_models/Request"); // ADJUST — confirm this is the real path to your Request model
-const STATUS_COPY = require("./constants/pr/statusCopy"); // ADJUST — confirm this is the real path; must export { [status]: { title, body } }
+const pru_works = require("./routes/padiman_utility/pru.works.router");
+const pru_hire_equipment = require("./routes/padiman_utility/pru.hire.equipment");
+const pru_requesting = require("./routes/padiman_utility/pru.requesting.routes");
+const pru_payment = require("./routes/padiman_utility/pru.payments");
+const pru_wallet = require("./routes/padiman_utility/pru.wallet.route");
+const Request = require("./models/padiman_route_models/Request");
+const STATUS_COPY = require("./constants/pr/statusCopy");
+const pru_home = require("./routes/padiman_utility/pru.home.routes");
 
 const app = express();
 const server = http.createServer(app);
@@ -100,6 +104,8 @@ app.use("/api/v1/padiman_route/wallet", pr_wallet);
 app.use("/api/v1/padiman_route/driver", pr_driver);
 app.use("/api/v1/padiman_route/admin", pr_admin);
 app.use("/api/v1/padiman_route/admin/data", pr_admin_data);
+app.use("/api/v1/pru/home", pru_home);
+
 app.use(
   "/api/v1/padiman_route/types/requests",
   (req, res, next) => {
@@ -116,7 +122,11 @@ app.use("/api/v1/pru/auth/", pru_auth);
 app.use("/api/v1/pru/assest/", pru_asset);
 app.use("/api/v1/pru/sales/", pru_sales);
 app.use("/api/v1/pru/lost-found", pru_found);
-
+app.use("/api/v1/pru/works", pru_works);
+app.use("/api/v1/pru/hire-equipment", pru_hire_equipment);
+app.use("/api/v1/pru/requesting", pru_requesting);
+app.use("/api/v1/pru/payments", pru_payment);
+app.use("/api/v1/pru/wallet", pru_wallet);
 //pr_driver
 //dashboardRoutes
 app.get("/", (req, res) => {
@@ -717,6 +727,426 @@ io.on("connection", (socket) => {
       );
     }
   };
+
+  // =========================================================================
+  // === U-SERVER (UTILITY) REQUESTING SOCKET EVENTS ===
+  // =========================================================================
+
+  // =========================================================================
+  // === U-SERVER (UTILITY) REQUESTING SOCKET EVENTS ===
+  // =========================================================================
+
+  // === JOIN REQUESTING CHAT ===
+  socket.on("u-join-request-chat", async ({ requestId, userPayload }) => {
+    console.log(
+      `📥 [u-join-request-chat] Socket ${socket.id} requesting to join Requesting chat:`,
+      requestId
+    );
+    console.log(`👤 [u-join-request-chat] User payload received:`, userPayload);
+
+    if (!requestId || !mongoose.Types.ObjectId.isValid(requestId)) {
+      console.error(
+        `❌ [u-join-request-chat] Invalid Request ID provided: ${requestId}`
+      );
+      console.log(
+        `❌ [u-join-request-chat] Emitted error: "Invalid request ID format" to socket ${socket.id}`
+      );
+      return socket.emit("error", { message: "Invalid request ID format" });
+    }
+
+    if (!userPayload?.id && !userPayload?._id) {
+      console.error(`❌ [u-join-request-chat] Missing user ID in userPayload`);
+      console.log(
+        `❌ [u-join-request-chat] Emitted error: "userPayload with id required" to socket ${socket.id}`
+      );
+      return socket.emit("error", { message: "userPayload with id required" });
+    }
+
+    const userId = userPayload.id || userPayload._id;
+
+    socket.join(requestId);
+    console.log(
+      `🔌 [u-join-request-chat] Socket ${socket.id} joined room: ${requestId}`
+    );
+
+    if (!rooms.has(requestId)) {
+      rooms.set(requestId, { users: new Map(), messages: [] });
+      console.log(
+        `🏠 [u-join-request-chat] Created new room structure in memory for: ${requestId}`
+      );
+    }
+
+    const room = rooms.get(requestId);
+    room.users.set(socket.id, userPayload);
+    console.log(
+      `👥 [u-join-request-chat] Added user to room map. Current room user count: ${room.users.size}`
+    );
+
+    try {
+      console.log(
+        `⏳ [u-join-request-chat] Marking unread messages as read for user ${userId} in request: ${requestId}...`
+      );
+
+      // Update messages where the user hasn't read them yet (user id not in readBy)
+      await RequestingMessage.updateMany(
+        {
+          request: requestId,
+          sender: { $ne: userId }, // Don't mark own messages
+          readBy: { $ne: userId }, // User hasn't read it yet
+        },
+        {
+          $set: { isRead: true },
+          $addToSet: { readBy: userId },
+        }
+      );
+
+      console.log(
+        `⏳ [u-join-request-chat] Fetching messages for Request: ${requestId}...`
+      );
+      const allMessages = await RequestingMessage.find({
+        request: requestId,
+      })
+        .sort({ createdAt: 1 })
+        .populate("sender", "name fullName email profileImage");
+
+      console.log(
+        `✅ [u-join-request-chat] Retrieved ${allMessages.length} messages from DB.`
+      );
+
+      const formattedMessages = allMessages.map((msg) => ({
+        id: msg._id?.toString(),
+        request: msg.request.toString(),
+        sender: msg.sender,
+        text: msg.text,
+        type: msg.type || "text",
+        meta: msg.meta || {},
+        attachments: msg.attachments || [],
+        isRead: msg.isRead || false,
+        isPriceSet: msg.isPriceSet || false,
+        price: msg.price || 0,
+        readBy: msg.readBy || [],
+        timestamp: msg.createdAt,
+        time: formatMessageTime(msg.createdAt),
+      }));
+      console.log(
+        `📋 [u-join-request-chat] Formatted ${formattedMessages.length} messages for client delivery.`
+      );
+
+      socket.emit("u-room-joined", {
+        users: Array.from(room.users.values()),
+        messages: formattedMessages,
+      });
+      console.log(
+        `✅ [u-join-request-chat] Emitted 'u-room-joined' to socket ${socket.id} with history.`
+      );
+
+      socket.to(requestId).emit("u-user-joined", { userPayload });
+      console.log(
+        `✅ [u-join-request-chat] Broadcasted 'u-user-joined' to room ${requestId}.`
+      );
+    } catch (error) {
+      console.error("❌ [u-join-request-chat] Error joining chat:", error);
+      console.log(
+        `❌ [u-join-request-chat] Emitted error: "Failed to join requesting chat room" to socket ${socket.id}`
+      );
+      socket.emit("error", { message: "Failed to join requesting chat room" });
+    }
+  });
+
+  // === SEND MESSAGE & OFFER PRICE ===
+  socket.on("u-request-chat-message", async (payload) => {
+    console.log(
+      `📥 [u-request-chat-message] Received message payload from sender: ${payload.senderId}`
+    );
+    console.log(
+      `📄 [u-request-chat-message] Payload text: "${payload.text}", priceSet: ${payload.isPriceSet}, price: ${payload.price}`
+    );
+
+    try {
+      const {
+        requestId,
+        text,
+        attachments,
+        senderId,
+        price,
+        isPriceSet,
+        clientId,
+      } = payload;
+
+      const cleanRequestId = getCleanId(requestId);
+      console.log(
+        `🧹 [u-request-chat-message] Cleaned Request ID: ${cleanRequestId}`
+      );
+
+      let finalMessageText = text ? text.trim() : "";
+      if (!finalMessageText && isPriceSet && Number(price) > 0) {
+        finalMessageText = `A utility offer of ₦${Number(
+          price
+        ).toLocaleString()} was made.`;
+        console.log(
+          `📝 [u-request-chat-message] Auto-generated price offer text: ${finalMessageText}`
+        );
+      }
+      if (!finalMessageText) {
+        finalMessageText = "Utility offer details attached.";
+        console.log(
+          `📝 [u-request-chat-message] Defaulted message text to: ${finalMessageText}`
+        );
+      }
+
+      // Save message
+      console.log(
+        `⏳ [u-request-chat-message] Saving new message to DB for request: ${cleanRequestId}...`
+      );
+      const newMessage = await RequestingMessage.create({
+        request: cleanRequestId,
+        sender: senderId,
+        text: finalMessageText,
+        attachments: attachments || [],
+        price: price || 0,
+        isPriceSet: isPriceSet || false,
+        isRead: false,
+        type: isPriceSet ? "price" : "text",
+      });
+
+      const populatedMessage = await newMessage.populate(
+        "sender",
+        "name fullName email profileImage"
+      );
+
+      console.log(
+        `✅ [u-request-chat-message] Message saved with ID: ${populatedMessage._id.toString()}`
+      );
+
+      const messageToSend = {
+        id: populatedMessage._id.toString(),
+        request: cleanRequestId,
+        sender: populatedMessage.sender,
+        text: populatedMessage.text,
+        type: populatedMessage.type || "text",
+        attachments: populatedMessage.attachments,
+        isRead: populatedMessage.isRead,
+        isPriceSet: populatedMessage.isPriceSet,
+        price: populatedMessage.price,
+        readBy: populatedMessage.readBy,
+        timestamp: populatedMessage.createdAt,
+        time: formatMessageTime(populatedMessage.createdAt),
+        clientId,
+      };
+      console.log(
+        `📋 [u-request-chat-message] Prepared message object for broadcast.`
+      );
+
+      // Broadcast message
+      io.to(cleanRequestId).emit("u-chat-message", messageToSend);
+      console.log(
+        `✅ [u-request-chat-message] Emitted 'u-chat-message' to room ${cleanRequestId}`
+      );
+
+      // Trigger notification helper if needed
+      // await sendChatNotification(cleanRequestId, populatedMessage, senderId);
+    } catch (error) {
+      console.error(
+        "❌ [u-request-chat-message] Error sending message:",
+        error
+      );
+      console.log(
+        `❌ [u-request-chat-message] Emitted error: "Failed to send message" to socket ${socket.id}`
+      );
+      socket.emit("error", { message: "Failed to send message" });
+    }
+  });
+
+  // === AGREE TO PRICE ===
+  socket.on(
+    "u-request-agree-price",
+    async ({ messageId, requestId, price }) => {
+      console.log(
+        `📥 [u-request-agree-price] Received price agreement for request: ${requestId} | Price: ₦${price}`
+      );
+      try {
+        const cleanRequestId = getCleanId(requestId);
+        console.log(
+          `🧹 [u-request-agree-price] Cleaned Request ID: ${cleanRequestId}`
+        );
+
+        console.log(
+          `⏳ [u-request-agree-price] Updating Requesting DB record...`
+        );
+        const updatedRequest = await mongoose
+          .model("Requesting")
+          .findByIdAndUpdate(
+            cleanRequestId,
+            { isPriceSet: true, price: price, isAgreed: true },
+            { new: true }
+          );
+        console.log(
+          `✅ [u-request-agree-price] Database record successfully updated for request: ${cleanRequestId}`
+        );
+
+        // Broadcast to room
+        io.to(cleanRequestId).emit("u-price-agreed", {
+          messageId,
+          requestId: cleanRequestId,
+          price,
+          updatedRequest,
+        });
+
+        console.log(
+          `✅ [u-request-agree-price] Price Agreed and broadcasted | Room: ${cleanRequestId} | Price: ₦${price}`
+        );
+
+        // Send notification helper if needed
+        // await sendPriceAgreedNotification(cleanRequestId, price);
+      } catch (error) {
+        console.error(
+          "❌ [u-request-agree-price] Error agreeing to price:",
+          error
+        );
+        console.log(
+          `❌ [u-request-agree-price] Emitted error: "Failed to agree to utility price" to socket ${socket.id}`
+        );
+        socket.emit("error", { message: "Failed to agree to utility price" });
+      }
+    }
+  );
+
+  // === UPDATE STATUS & LOCATION ===
+  socket.on("u-update-request-progress", async (payload) => {
+    console.log(
+      `📥 [u-update-request-progress] Received status update payload:`,
+      payload
+    );
+    try {
+      const { requestId, status, currentLocation, senderId } = payload;
+
+      const cleanRequestId = getCleanId(requestId);
+      console.log(
+        `🧹 [u-update-request-progress] Cleaned Request ID: ${cleanRequestId}`
+      );
+
+      if (!cleanRequestId || !mongoose.Types.ObjectId.isValid(cleanRequestId)) {
+        console.error(
+          `❌ [u-update-request-progress] Valid requestId is missing or invalid: ${requestId}`
+        );
+        console.log(
+          `❌ [u-update-request-progress] Emitted error: "Valid requestId is required" to socket ${socket.id}`
+        );
+        return socket.emit("error", { message: "Valid requestId is required" });
+      }
+
+      console.log(
+        `⏳ [u-update-request-progress] Finding Requesting by ID: ${cleanRequestId}...`
+      );
+
+      const RequestingModel = mongoose.model("Requesting");
+      const requestItem = await RequestingModel.findById(cleanRequestId);
+
+      if (!requestItem) {
+        console.error(
+          `❌ [u-update-request-progress] Requesting item not found for ID: ${cleanRequestId}`
+        );
+        console.log(
+          `❌ [u-update-request-progress] Emitted error: "Requesting item not found" to socket ${socket.id}`
+        );
+        return socket.emit("error", { message: "Requesting item not found" });
+      }
+      console.log(
+        `✅ [u-update-request-progress] Found request item in database.`
+      );
+
+      const statusActuallyProvided = Boolean(status);
+
+      if (status) requestItem.status = status;
+      if (currentLocation !== undefined)
+        requestItem.currentLocation = currentLocation;
+
+      await requestItem.save();
+      console.log(
+        `✅ [u-update-request-progress] Updated Requesting status to: ${
+          status || "unchanged"
+        }, location: ${currentLocation || "unchanged"}`
+      );
+
+      let systemText = null;
+      if (statusActuallyProvided) {
+        systemText = `Status updated to "${status.replace(/_/g, " ")}"`;
+      }
+      if (currentLocation) {
+        systemText = systemText
+          ? `${systemText} • Location: ${currentLocation}`
+          : `Location updated: ${currentLocation}`;
+      }
+      console.log(
+        `📝 [u-update-request-progress] Generated system text for chat message: ${
+          systemText || "None"
+        }`
+      );
+
+      let messageToSend = null;
+
+      if (systemText) {
+        console.log(
+          `⏳ [u-update-request-progress] Creating inline status message in requesting chat...`
+        );
+        const newMessage = await RequestingMessage.create({
+          request: cleanRequestId,
+          sender: senderId,
+          text: systemText,
+          type: "status",
+          meta: { status, currentLocation, requestId: cleanRequestId },
+          isRead: false,
+        });
+
+        const populatedMessage = await newMessage.populate(
+          "sender",
+          "name fullName email profileImage"
+        );
+        console.log(
+          `✅ [u-update-request-progress] Inline status message created and populated with ID: ${populatedMessage._id}`
+        );
+
+        messageToSend = {
+          id: populatedMessage._id.toString(),
+          request: cleanRequestId,
+          sender: populatedMessage.sender,
+          text: populatedMessage.text,
+          type: populatedMessage.type,
+          meta: populatedMessage.meta,
+          isRead: populatedMessage.isRead,
+          readBy: populatedMessage.readBy,
+          timestamp: populatedMessage.createdAt,
+          time: formatMessageTime(populatedMessage.createdAt),
+        };
+
+        io.to(cleanRequestId).emit("u-chat-message", messageToSend);
+        console.log(
+          `✅ [u-update-request-progress] Emitted status as inline chat message to room ${cleanRequestId}`
+        );
+      }
+
+      io.to(cleanRequestId).emit("u-request-progress-updated", {
+        requestId: requestItem._id.toString(),
+        status: requestItem.status,
+        currentLocation: requestItem.currentLocation,
+        message: messageToSend,
+      });
+      console.log(
+        `✅ [u-update-request-progress] Emitted 'u-request-progress-updated' event.`
+      );
+    } catch (error) {
+      console.error(
+        "❌ [u-update-request-progress] Error updating request progress via socket:",
+        error
+      );
+      console.log(
+        `❌ [u-update-request-progress] Emitted error: "Failed to update utility request progress" to socket ${socket.id}`
+      );
+      socket.emit("error", {
+        message: "Failed to update utility request progress",
+      });
+    }
+  });
 
   socket.on("register_user", async ({ userId }) => {
     console.log(

@@ -28,6 +28,7 @@ const PRUtilitySchema = new mongoose.Schema(
     },
     password: {
       type: String,
+    
       required: true,
     },
     countryCode: {
@@ -55,7 +56,6 @@ const PRUtilitySchema = new mongoose.Schema(
       default: null,
     },
 
-    // ==================== NEW FIELDS ====================
     gender: {
       type: String,
       enum: ["Male", "Female", "Other", "Prefer not to say"],
@@ -78,15 +78,24 @@ const PRUtilitySchema = new mongoose.Schema(
       trim: true,
       default: null,
     },
-
-    // NEW: Availability for workmen
     isAvailable: {
       type: Boolean,
-      default: false, // Default to not available
+      default: false,
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
+  }
 );
+
+// Virtual to easily fetch all works linked to this PRUtility user
+PRUtilitySchema.virtual("works", {
+  ref: "Work",
+  localField: "_id",
+  foreignField: "workman",
+});
 
 // Existing indexes
 PRUtilitySchema.index({ email: 1 });

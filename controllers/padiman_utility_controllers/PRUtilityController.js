@@ -163,12 +163,14 @@ const loginPRUtility = async (req, res) => {
     if (!isMatch)
       return res.status(401).json({ message: "Invalid credentials" });
 
+    // Update expo token if provided
     if (expoPushToken) {
       user.expoPushToken = expoPushToken;
-      await user.save();
     }
 
     if (!user.isVerified) {
+      // Save any expo token changes before returning
+      if (expoPushToken) await user.save();
       return res.status(200).json({
         message: "Account not verified. Please verify your email first.",
         user: {
@@ -180,8 +182,17 @@ const loginPRUtility = async (req, res) => {
       });
     }
 
+    // 🔥 INCREMENT TOKEN VERSION TO INVALIDATE PREVIOUS TOKENS
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    await user.save();
+
+    // 🔥 ADD TOKEN VERSION TO JWT PAYLOAD
     const token = jwt.sign(
-      { id: user._id, isWorkman: user.isWorkman },
+      {
+        id: user._id,
+        isWorkman: user.isWorkman,
+        tokenVersion: user.tokenVersion,
+      },
       process.env.JWT_SECRET_PRU,
       { expiresIn: "7d" }
     );
@@ -200,6 +211,7 @@ const loginPRUtility = async (req, res) => {
       token,
     });
   } catch (error) {
+    console.error("Login error:", error);
     res.status(500).json({ message: "Server error" });
   }
 };

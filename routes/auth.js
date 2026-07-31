@@ -169,7 +169,11 @@ router.post("/login", async (req, res) => {
   try {
     let { email, password } = req.body;
 
-    email = email?.trim().toLowerCase();
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email and password are required" });
+    }
+
+    email = email.trim().toLowerCase();
     console.log("Normalized email:", email);
 
     // 1. Find user
@@ -254,7 +258,10 @@ router.post("/login", async (req, res) => {
     return res.json(responsePayload);
   } catch (error) {
     console.error("🔥 LOGIN ERROR:", error);
-    return res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ 
+      message: "Server error", 
+      error: error.message 
+    });
   }
 });
 // FORGOT PASSWORD
