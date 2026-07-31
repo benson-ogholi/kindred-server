@@ -2,6 +2,8 @@ const mongoose = require("mongoose");
 const Requesting = require("../../models/padiman_utility_models/Requesting");
 const RequestingMessage = require("../../models/padiman_utility_models/RequestingMessage");
 const PRUtility = require("../../models/padiman_utility_models/PRUtility");
+const Work = require("../../models/padiman_utility_models/Work");
+const HireEquipment = require("../../models/padiman_utility_models/HireEquipment");
 
 let Wallet = require("../../models/padiman_utility_models/Wallet");
 if (Wallet && Wallet.Wallet) Wallet = Wallet.Wallet;
@@ -22,8 +24,8 @@ function endOfDay(d = new Date()) {
 }
 function startOfWeek(d = new Date()) {
   const x = startOfDay(d);
-  const day = x.getDay(); // 0 Sun
-  const diff = day === 0 ? 6 : day - 1; // Monday start
+  const day = x.getDay();
+  const diff = day === 0 ? 6 : day - 1;
   x.setDate(x.getDate() - diff);
   return x;
 }
@@ -39,10 +41,6 @@ function isWorkmanUser(user) {
   );
 }
 
-/**
- * Build per-status breakdown for a list of Requesting docs.
- * Returns: { status, count, ids: [] }[]
- */
 function buildStatusBreakdown(requests) {
   const map = new Map();
   for (const r of requests) {
@@ -57,15 +55,12 @@ function buildStatusBreakdown(requests) {
   return Array.from(map.values());
 }
 
-/**
- * Split by itemType: work | hireEquipment
- */
 function splitByItemType(requests) {
   const work = [];
   const hireEquipment = [];
   for (const r of requests) {
     if (r.itemType === "hireEquipment") hireEquipment.push(r);
-    else work.push(r); // default "work"
+    else work.push(r);
   }
   return { work, hireEquipment };
 }
@@ -82,10 +77,69 @@ function sumEarningsInRange(earnings, from, to) {
   }, 0);
 }
 
+/**
+ * Attach jobTitle / equipmentTitle + full targetItem object
+ */
+async function populateTargetTitles(requests) {
+  if (!Array.isArray(requests) || requests.length === 0) return requests;
+
+  const workIds = [];
+  const equipIds = [];
+
+  for (const r of requests) {
+    if (!r.targetItem) continue;
+    if (r.itemType === "hireEquipment") {
+      equipIds.push(r.targetItem);
+    } else {
+      workIds.push(r.targetItem);
+    }
+  }
+
+  const [works, equips] = await Promise.all([
+    workIds.length
+      ? Work.find({ _id: { $in: workIds } })
+          .select(
+            "_id jobTitle category customCategory city state startingPrice imagesOfPreviousJobs isPaused"
+          )
+          .lean()
+      : [],
+    equipIds.length
+      ? HireEquipment.find({ _id: { $in: equipIds } })
+          .select(
+            "_id equipmentTitle category customCategory city state hiringPrice images isPaused pricePerUnit"
+          )
+          .lean()
+      : [],
+  ]);
+
+  const workMap = new Map(works.map((w) => [String(w._id), w]));
+  const equipMap = new Map(equips.map((e) => [String(e._id), e]));
+
+  return requests.map((r) => {
+    const tid = String(r.targetItem);
+    let target = null;
+    let title = null;
+
+    if (r.itemType === "hireEquipment") {
+      target = equipMap.get(tid) || null;
+      title = target?.equipmentTitle || null;
+    } else {
+      target = workMap.get(tid) || null;
+      title = target?.jobTitle || null;
+    }
+
+    return {
+      ...r,
+      targetItem: target || r.targetItem,
+      title,
+      jobTitle: r.itemType === "work" ? title : undefined,
+      equipmentTitle: r.itemType === "hireEquipment" ? title : undefined,
+    };
+  });
+}
+
 // =============================================================================
 // 1. HOME DASHBOARD
-//    Workman  → request counts/list (as requested/provider), earnings periods, recent payments (payer or receiver)
-//    Non-workman → own requests (as requester), amount spent, recent payments (payer or receiver)
 // =============================================================================
 exports.getHomeDashboard = async (req, res) => {
   try {
@@ -114,14 +168,15 @@ exports.getHomeDashboard = async (req, res) => {
     // WORKMAN HOME
     // ─────────────────────────────────────────────
     if (workman) {
-      // Requests where this user is the provider (requested)
-      const providerRequests = await Requesting.find({ requested: userId })
+      let providerRequests = await Requesting.find({ requested: userId })
         .select(
-          "_id targetItem status itemType amount isPaid isConfirmed createdAt requester"
+          "_id targetItem status itemType amount isPaid isConfirmed createdAt requester itemTypeModel"
         )
         .populate("requester", "fullName username profilePicture email")
         .sort({ createdAt: -1 })
         .lean();
+
+      providerRequests = await populateTargetTitles(providerRequests);
 
       const { work, hireEquipment } = splitByItemType(providerRequests);
 
@@ -129,7 +184,6 @@ exports.getHomeDashboard = async (req, res) => {
       const equipmentByStatus = buildStatusBreakdown(hireEquipment);
       const allByStatus = buildStatusBreakdown(providerRequests);
 
-      // Wallet earnings
       let wallet = await Wallet.findOne({ user: userId }).lean();
       const earnings = wallet?.earnings || [];
 
@@ -153,12 +207,9 @@ exports.getHomeDashboard = async (req, res) => {
           .reduce((s, e) => s + Number(e.amount || 0), 0),
       };
 
-      // Recent payments (as receiver or payer) — last 5
       let recentPayments = [];
       if (PruPayment && typeof PruPayment.find === "function") {
-        recentPayments = await PruPayment.find({
-          user: userId,
-        })
+        recentPayments = await PruPayment.find({ user: userId })
           .sort({ createdAt: -1 })
           .limit(5)
           .populate({
@@ -218,13 +269,15 @@ exports.getHomeDashboard = async (req, res) => {
     // ─────────────────────────────────────────────
     // NON-WORKMAN HOME
     // ─────────────────────────────────────────────
-    const myRequests = await Requesting.find({ requester: userId })
+    let myRequests = await Requesting.find({ requester: userId })
       .select(
-        "_id targetItem status itemType amount isPaid isConfirmed isAgreed createdAt requested"
+        "_id targetItem status itemType amount isPaid isConfirmed isAgreed createdAt requested itemTypeModel"
       )
       .populate("requested", "fullName username profilePicture email")
       .sort({ createdAt: -1 })
       .lean();
+
+    myRequests = await populateTargetTitles(myRequests);
 
     const { work, hireEquipment } = splitByItemType(myRequests);
 
@@ -232,7 +285,6 @@ exports.getHomeDashboard = async (req, res) => {
     const equipmentByStatus = buildStatusBreakdown(hireEquipment);
     const allByStatus = buildStatusBreakdown(myRequests);
 
-    // Amount spent (successful payments as payer)
     let amountSpent = 0;
     let recentPayments = [];
     if (PruPayment && typeof PruPayment.find === "function") {
@@ -246,9 +298,7 @@ exports.getHomeDashboard = async (req, res) => {
 
       amountSpent = paid.reduce((s, p) => s + Number(p.amount || 0), 0);
 
-      recentPayments = await PruPayment.find({
-        user: userId,
-      })
+      recentPayments = await PruPayment.find({ user: userId })
         .sort({ createdAt: -1 })
         .limit(5)
         .populate({
@@ -270,7 +320,6 @@ exports.getHomeDashboard = async (req, res) => {
         .lean();
     }
 
-    // Fallback: sum isPaid request amounts if no PruPayment rows
     if (amountSpent === 0) {
       amountSpent = myRequests
         .filter((r) => r.isPaid)
@@ -319,7 +368,7 @@ exports.getHomeDashboard = async (req, res) => {
 };
 
 // =============================================================================
-// 2. GET ALL PAYMENTS FOR USER (Whether Receiver or Payer)
+// 2. GET ALL PAYMENTS FOR USER
 // =============================================================================
 exports.getMyPayments = async (req, res) => {
   try {
@@ -338,7 +387,6 @@ exports.getMyPayments = async (req, res) => {
       });
     }
 
-    // Fetches all payments where the user is either payer or receiver
     const payments = await PruPayment.find({ user: userId })
       .sort({ createdAt: -1 })
       .populate({
@@ -375,9 +423,7 @@ exports.getMyPayments = async (req, res) => {
 };
 
 // =============================================================================
-// 3. MESSAGES PER REQUEST (everyone)
-//    Returns an array of { requestId, request, unreadCount, lastMessage, messages }
-//    for every Requesting the user is part of (requester or requested).
+// 3. MESSAGES PER REQUEST
 // =============================================================================
 exports.getMessagesPerRequest = async (req, res) => {
   try {
@@ -392,17 +438,18 @@ exports.getMessagesPerRequest = async (req, res) => {
     const limitPerRequest = Math.min(Number(req.query.limit) || 50, 100);
     const onlyWithMessages = req.query.onlyWithMessages === "true";
 
-    // All requests involving this user
-    const requests = await Requesting.find({
+    let requests = await Requesting.find({
       $or: [{ requester: userId }, { requested: userId }],
     })
       .select(
-        "_id targetItem status itemType amount isPaid isAgreed isConfirmed requester requested createdAt updatedAt"
+        "_id targetItem status itemType amount isPaid isAgreed isConfirmed requester requested createdAt updatedAt itemTypeModel"
       )
       .populate("requester", "fullName username profilePicture email")
       .populate("requested", "fullName username profilePicture email")
       .sort({ updatedAt: -1 })
       .lean();
+
+    requests = await populateTargetTitles(requests);
 
     if (!requests.length) {
       return res.status(200).json({
@@ -414,7 +461,6 @@ exports.getMessagesPerRequest = async (req, res) => {
 
     const requestIds = requests.map((r) => r._id);
 
-    // All messages for those requests
     const allMessages = await RequestingMessage.find({
       request: { $in: requestIds },
     })
@@ -422,7 +468,6 @@ exports.getMessagesPerRequest = async (req, res) => {
       .populate("sender", "fullName username profilePicture email")
       .lean();
 
-    // Group by request
     const byRequest = new Map();
     for (const msg of allMessages) {
       const key = msg.request?.toString?.() || String(msg.request);
@@ -438,7 +483,6 @@ exports.getMessagesPerRequest = async (req, res) => {
 
       if (onlyWithMessages && msgs.length === 0) continue;
 
-      // newest first already from sort; limit
       const limited = msgs.slice(0, limitPerRequest);
 
       const unreadCount = msgs.filter(
@@ -470,7 +514,6 @@ exports.getMessagesPerRequest = async (req, res) => {
       });
     }
 
-    // Sort threads by last message time (or request updatedAt)
     threads.sort((a, b) => {
       const ta = a.lastMessage?.createdAt
         ? new Date(a.lastMessage.createdAt).getTime()
@@ -515,7 +558,7 @@ exports.getMessagesByRequestId = async (req, res) => {
       });
     }
 
-    const requestDoc = await Requesting.findById(requestId)
+    let requestDoc = await Requesting.findById(requestId)
       .populate("requester", "fullName username profilePicture email")
       .populate("requested", "fullName username profilePicture email")
       .lean();
@@ -526,6 +569,10 @@ exports.getMessagesByRequestId = async (req, res) => {
         message: "Request not found",
       });
     }
+
+    // Attach title
+    const [populated] = await populateTargetTitles([requestDoc]);
+    requestDoc = populated;
 
     const isParticipant =
       String(requestDoc.requester?._id || requestDoc.requester) ===
@@ -541,11 +588,10 @@ exports.getMessagesByRequestId = async (req, res) => {
     }
 
     const messages = await RequestingMessage.find({ request: requestId })
-      .sort({ createdAt: 1 }) // chronological for chat UI
+      .sort({ createdAt: 1 })
       .populate("sender", "fullName username profilePicture email")
       .lean();
 
-    // Mark as read for this user (optional side-effect)
     await RequestingMessage.updateMany(
       {
         request: requestId,
