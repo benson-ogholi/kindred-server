@@ -2,8 +2,8 @@ const { Expo } = require("expo-server-sdk");
 const nodemailer = require("nodemailer");
 
 // Models — Safely points to isolated Mongoose model instances
-const PRUNOTIFY = require("../../models/padiman_utility_models/PRUNOTIFY");
-const PRUtility = require("../../models/padiman_utility_models/PRUtility");
+const PRUNOTIFY = require("../../models/padiman_utility_models/PRUNotify");
+const PRUtility = require("../../models/padiman_utility_models/PRUNotify");
 
 const expo = new Expo();
 
