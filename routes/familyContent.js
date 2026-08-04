@@ -172,6 +172,7 @@ router.post(
         description,
         voiceDuration,
         metadata,
+        videoUrl,
         creator: providedCreator,
       } = req.body;
 
@@ -241,6 +242,7 @@ router.post(
         description,
         images,
         voiceNote,
+        videoUrl,
         metadata: parsedMetadata,
         creator: providedCreator || req.user._id, // fallback to current user
       });
@@ -280,19 +282,20 @@ router.get("/family/:familyId/:type", protect, async (req, res) => {
     const { familyId, type } = req.params;
     const currentUserId = req.user._id;
 
-    // ===============================
-    // 🔐 VISIBILITY-AWARE QUERY
-    // ===============================
     const contents = await FamilyContent.find({
       familyId,
       contentType: type,
       $or: [
-        // 1️⃣ Family-visible content (everyone sees)
-        { "metadata.visibility": "family" },
+        // Family-wide (legacy + current)
+        { "metadata.visibility": { $in: ["family", "public"] } },
 
-        // 2️⃣ Private content ONLY if user is creator
+        // No visibility set → treat as family-visible
+        { "metadata.visibility": { $exists: false } },
+        { "metadata.visibility": null },
+
+        // Private / personal → only creator
         {
-          "metadata.visibility": "private",
+          "metadata.visibility": { $in: ["private", "personal"] },
           creator: currentUserId,
         },
       ],
@@ -300,18 +303,12 @@ router.get("/family/:familyId/:type", protect, async (req, res) => {
       .populate("creator", "firstName lastName profilePicture")
       .sort({ createdAt: -1 });
 
-    // ===============================
-    // ENRICH RESPONSE
-    // ===============================
     const enriched = contents.map((item) => {
       const itemObj = item.toObject();
-
       const isReadArray = Array.isArray(itemObj.isRead) ? itemObj.isRead : [];
-
       const isNewForUser = !isReadArray.some(
         (id) => id?.toString() === currentUserId.toString()
       );
-
       const creatorId = itemObj.creator?._id?.toString();
 
       return {
@@ -321,9 +318,6 @@ router.get("/family/:familyId/:type", protect, async (req, res) => {
       };
     });
 
-    // ===============================
-    // MARK AS READ (ONLY VISIBLE ITEMS)
-    // ===============================
     await FamilyContent.updateMany(
       {
         _id: { $in: contents.map((c) => c._id) },
@@ -370,9 +364,14 @@ router.put(
       }
 
       // 1. Update Text Fields
-      const { title, description, voiceDuration, metadata } = req.body;
-      if (title) content.title = title;
-      if (description) content.description = description;
+      const { title, description, voiceDuration, metadata, videoUrl } = req.body;
+      if (title !== undefined) content.title = title;
+      if (description !== undefined) content.description = description;
+
+      // Update videoUrl (supports updating string or clearing it)
+      if (videoUrl !== undefined) {
+        content.videoUrl = videoUrl;
+      }
 
       if (metadata) {
         // Parse metadata if it comes in as a string from FormData

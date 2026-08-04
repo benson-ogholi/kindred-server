@@ -43,8 +43,8 @@ router.get("/family/:familyId", protect, async (req, res) => {
 
     // 1. 🔹 Fetch the polls
     const polls = await Poll.find({ familyId })
-      .populate("sender", "firstName lastName profilePicture")
-      .sort({ createdAt: -1 });
+    .populate("sender", "firstName lastName profilePicture")
+    .sort({ createdAt: -1 });
 
     // 2. 🔹 Enrich data and identify "isNew" safely
     const enrichedPolls = polls.map((poll) => {
