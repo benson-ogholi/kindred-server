@@ -6,6 +6,47 @@ const { uploadToBackblaze } = require("../utils/uploadToBackblaze");
 const multer = require("multer"); // <-- This is required for upload
 const upload = multer({ storage: multer.memoryStorage() });
 
+// Save VoIP Token Route
+router.post("/voip-token", protect, async (req, res) => {
+  try {
+    const { voipPushToken } = req.body;
+    const userId = req.user._id; // Securely using ID from the protect middleware
+
+    if (!voipPushToken) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing voipPushToken",
+      });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { voipPushToken },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found",
+      });
+    }
+
+    console.log(`[voip-token] Saved VoIP token for user ${userId}`);
+
+    res.status(200).json({
+      success: true,
+      voipPushToken: user.voipPushToken,
+    });
+  } catch (err) {
+    console.error("[voip-token] error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Failed to save VoIP token",
+    });
+  }
+});
+
 router.get("/profile", protect, async (req, res) => {
   try {
     // req.user._id is provided by the protect middleware
@@ -192,7 +233,6 @@ router.get("/:id", protect, async (req, res) => {
       ...(showContact && {
         email: user.email,
         phone: user.phone,
-        dateOfBirth: user.dateOfBirth,
       }),
 
       privacySettings: user.privacySettings,
@@ -211,6 +251,7 @@ router.get("/:id", protect, async (req, res) => {
     res.status(500).json({ message: "Server error fetching user details" });
   }
 });
+
 // Update Expo Push Token
 router.patch("/push-token", protect, async (req, res) => {
   try {

@@ -1,42 +1,45 @@
-// Filename: notificationUtils.js
+// notificationUtils.js
 const { Expo } = require("expo-server-sdk");
 const User = require("../models/User");
 
-// Initialize a new Expo SDK client
 let expo = new Expo();
 
 /**
- * Send a push notification to a user by their ID
- * @param {String} userId - MongoDB user ID
- * @param {Object} messageData - { title, body, router }
+ * @param {String} userId
+ * @param {Object} messageData - { title, body, router, data?, sound? }
  */
 const sendPushNotificationToUser = async (userId, messageData) => {
   try {
     if (!userId) throw new Error("User ID is required");
-    const { title, body, router } = messageData;
 
-    // Find the user
+    const { title, body, router, data = {}, sound = "default" } = messageData;
+
     const user = await User.findById(userId);
     if (!user) {
       console.log(`User ${userId} not found, skipping notification.`);
       return;
     }
 
-    // Check if user has any Expo push tokens
     if (!user.exponentPushTokens || user.exponentPushTokens.length === 0) {
       console.log(`User ${userId} has no push tokens`);
       return;
     }
 
-    // Prepare messages
     const messages = user.exponentPushTokens
       .filter(Expo.isExpoPushToken)
       .map((token) => ({
         to: token,
-        sound: "default",
+        sound,
         title,
         body,
-        data: { router }, // Optional: can be used on client to navigate
+        // Everything the client needs when the app is opened from the notification
+        data: {
+          router,
+          ...data, // type, roomId, callerId, etc.
+        },
+        // Optional but recommended for calls
+        priority: "high",
+        channelId: "calls", // create this channel on Android
       }));
 
     if (messages.length === 0) {
@@ -44,7 +47,6 @@ const sendPushNotificationToUser = async (userId, messageData) => {
       return;
     }
 
-    // Send notifications in chunks (Expo recommends chunking)
     const chunks = expo.chunkPushNotifications(messages);
     for (const chunk of chunks) {
       try {

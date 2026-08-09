@@ -22,6 +22,19 @@ const defaultRights = {
   isModerator: false,
 };
 
+// Helper: owner is now always an array
+const isUserOwner = (family, userId) => {
+  const owners = Array.isArray(family.owner)
+    ? family.owner
+    : family.owner
+    ? [family.owner]
+    : [];
+  return owners.some((o) => {
+    const id = o._id ? o._id.toString() : o.toString();
+    return id === userId.toString();
+  });
+};
+
 // 1️⃣ Get all family members
 router.post("/get-members", protect, async (req, res) => {
   try {
@@ -37,6 +50,11 @@ router.post("/get-members", protect, async (req, res) => {
     );
     if (!family) return res.status(404).json({ message: "Family not found" });
 
+    // Ensure owner is treated as array
+    if (!Array.isArray(family.owner)) {
+      family.owner = family.owner ? [family.owner] : [];
+    }
+
     const members = await FamilyMember.find({ family: familyId })
       .populate("user", "firstName lastName profilePicture email")
       .sort({ joinedAt: 1 });
@@ -44,7 +62,7 @@ router.post("/get-members", protect, async (req, res) => {
     const simplifiedMembers = await Promise.all(
       members.map(async (m) => {
         const memberUserId = m.user._id.toString();
-        const isOwner = memberUserId === family.owner._id.toString();
+        const isOwner = isUserOwner(family, memberUserId);
         const isAdmin = !isOwner && m.rights?.get?.("isAdmin");
 
         let uuid = null;

@@ -33,6 +33,7 @@ const notificationSchema = new mongoose.Schema(
         "FAMILY_JOIN_DECLINED",
         "REPORT_COMMENT",
         "FAMILY_INVITE",
+        "FAMILY_NAME_UPDATED",
 
         "CONTRIBUTION_SUBMITTED", // When a user uploads a receipt
         "PAYMENT_APPROVED", // When admin accepts

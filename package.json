@@ -12,6 +12,9 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@config-plugins/react-native-webrtc": "^15.0.1",
+    "@google/generative-ai": "^0.24.1",
+    "apn": "^2.2.0",
     "backblaze-b2": "^1.7.1",
     "bcrypt": "^6.0.0",
     "bcryptjs": "^3.0.3",
@@ -24,6 +27,8 @@
     "mongoose": "^9.0.2",
     "multer": "^2.0.2",
     "nodemailer": "^7.0.12",
+    "openai": "^7.4.0",
+    "react-native-webrtc": "^124.0.8",
     "socket.io": "^4.8.3",
     "stripe": "^20.1.0"
   },

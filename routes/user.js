@@ -3,6 +3,47 @@ const router = express.Router();
 const User = require("../models/User");
 const { protect } = require("../middlewares/authMiddleware");
 
+
+router.post("/voip-token", async (req, res) => {
+  try {
+    const { userId, voipPushToken } = req.body;
+
+    if (!userId || !voipPushToken) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing userId or voipPushToken",
+      });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { voipPushToken },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found",
+      });
+    }
+
+    console.log(`[voip-token] Saved VoIP token for user ${userId}`);
+
+    res.status(200).json({
+      success: true,
+      voipPushToken: user.voipPushToken,
+    });
+  } catch (err) {
+    console.error("[voip-token] error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Failed to save VoIP token",
+    });
+  }
+});
+
+
 router.patch("/profile", protect, async (req, res) => {
   try {
     const user = await User.findById(req.user._id);

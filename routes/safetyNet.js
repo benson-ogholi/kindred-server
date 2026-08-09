@@ -6,26 +6,38 @@ const { protect } = require("../middlewares/authMiddleware");
 const { uploadToBackblaze } = require("../utils/uploadToBackblaze");
 const multer = require("multer");
 
-// Multer setup using memory storage for Backblaze buffer
+// Multer setup
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
 });
 
+// Helper: owner is now an array
+const isUserOwner = (family, userId) => {
+  const owners = Array.isArray(family.owner)
+    ? family.owner
+    : family.owner
+    ? [family.owner]
+    : [];
+  return owners.some((o) => {
+    const id = o._id ? o._id.toString() : o.toString();
+    return id === userId.toString();
+  });
+};
+
 /**
- * 🔐 Helper: Check family access
+ * 🔐 Helper: Check family access (owner array + members)
  */
 const hasFamilyAccess = (family, userId) => {
   return (
-    family.owner.toString() === userId ||
-    family.members.some((m) => m.toString() === userId)
+    isUserOwner(family, userId) ||
+    family.members.some((m) => m.toString() === userId.toString())
   );
 };
 
 // ---------------------------------------------------------
-// 1️⃣ CREATE SAFETY NET (with FormData & Multimedia)
-// POST /api/v1/safety-net/:familyId
+// 1️⃣ CREATE SAFETY NET
 // ---------------------------------------------------------
 router.post(
   "/:familyId",
@@ -38,18 +50,27 @@ router.post(
   async (req, res) => {
     try {
       const { familyId } = req.params;
-      const { title, description, triggerDate, assignedUsers } = req.body; // Added description
+      const { title, description, triggerDate, assignedUsers } = req.body;
 
+      console.warn(
+        title,
+        description,
+        triggerDate,
+        assignedUsers,
+        "assignedUsers"
+      );
 
-      console.warn(title, description, triggerDate, assignedUsers, 'assignedUsersassignedUsers')
       const family = await Family.findById(familyId);
-      if (!family || !description ||  !hasFamilyAccess(family, req.user._id.toString())) {
+      if (
+        !family ||
+        !description ||
+        !hasFamilyAccess(family, req.user._id.toString())
+      ) {
         return res
           .status(403)
           .json({ message: "Unauthorized access to family" });
       }
 
-      // Process file uploads to Backblaze
       const processFiles = async (files, folder) => {
         if (!files) return [];
         return Promise.all(
@@ -69,7 +90,7 @@ router.post(
         family: familyId,
         createdBy: req.user._id,
         title,
-        description, // Saved to DB
+        description,
         imageUrls,
         audioUrls,
         videoUrls,
@@ -77,7 +98,7 @@ router.post(
         triggerDate,
       });
 
-      console.log(safetyNet, 'safetyNetsafetyNet')
+      console.log(safetyNet, "safetyNet");
       res.status(201).json({ message: "Safety Net created", safetyNet });
     } catch (error) {
       res.status(500).json({ message: error.message });
@@ -87,50 +108,43 @@ router.post(
 
 // ---------------------------------------------------------
 // 2️⃣ GET ALL SAFETY NETS FOR A FAMILY
-// GET /api/v1/safety-net/family/:familyId
 // ---------------------------------------------------------
 router.get("/family/:familyId", protect, async (req, res) => {
   const userId = req.user._id;
   const { familyId } = req.params;
-  const now = new Date(); // Current time to compare against triggerDate
+  const now = new Date();
 
   console.log("📂 [GET ALL] Fetching vaults for family:", familyId);
 
   try {
-      // 1. Mark relevant vaults as Read (Keep your existing logic for RELEASED vaults)
-      await SafetyNet.updateMany(
-          {
-              family: familyId,
-              assignedUsers: userId,
-              status: "RELEASED",
-              isRead: { $ne: userId }
-          },
-          { $addToSet: { isRead: userId } }
-      );
+    await SafetyNet.updateMany(
+      {
+        family: familyId,
+        assignedUsers: userId,
+        status: "RELEASED",
+        isRead: { $ne: userId },
+      },
+      { $addToSet: { isRead: userId } }
+    );
 
-      // 2. Fetch with Privacy Logic
-      const nets = await SafetyNet.find({
-          family: familyId,
-          $or: [
-              { createdBy: userId },             // Rule 1: I created it, I can see it.
-              { triggerDate: { $lte: now } }    // Rule 2: It's past the trigger date, anyone assigned can see it.
-          ]
-      })
+    const nets = await SafetyNet.find({
+      family: familyId,
+      $or: [{ createdBy: userId }, { triggerDate: { $lte: now } }],
+    })
       .populate("createdBy", "-password")
       .populate("assignedUsers", "-password")
       .sort({ createdAt: -1 });
 
-      console.log(`✅ [GET ALL SUCCESS] Found ${nets.length} visible vaults.`);
-      res.status(200).json(nets);
+    console.log(`✅ [GET ALL SUCCESS] Found ${nets.length} visible vaults.`);
+    res.status(200).json(nets);
   } catch (error) {
-      console.error("🔥 [GET ALL ERROR]:", error.message);
-      res.status(500).json({ message: "Error fetching safety nets" });
+    console.error("🔥 [GET ALL ERROR]:", error.message);
+    res.status(500).json({ message: "Error fetching safety nets" });
   }
 });
 
 // ---------------------------------------------------------
 // 7️⃣ GET SINGLE SAFETY NET BY ID
-// GET /api/v1/safety-net/:id
 // ---------------------------------------------------------
 router.get("/:id", protect, async (req, res) => {
   const userId = req.user._id.toString();
@@ -146,38 +160,37 @@ router.get("/:id", protect, async (req, res) => {
     }
 
     const isCreator = net.createdBy._id.toString() === userId;
-    const isAssigned = net.assignedUsers.some(u => u._id.toString() === userId);
+    const isAssigned = net.assignedUsers.some(
+      (u) => u._id.toString() === userId
+    );
     const isTriggered = new Date(net.triggerDate) <= now;
 
-    // 1. Authorization: If you aren't the creator OR an assigned user, you get nothing.
     if (!isCreator && !isAssigned) {
       return res.status(403).json({ message: "Unauthorized access" });
     }
 
-    // 2. Strict Privacy: If you ARE assigned, but NOT the creator, 
-    // and the date hasn't arrived, block the entire fetch.
     if (!isCreator && !isTriggered) {
-      console.log("🔒 [STRICT BLOCK] Beneficiary tried to fetch before triggerDate.");
-      return res.status(403).json({ 
+      console.log(
+        "🔒 [STRICT BLOCK] Beneficiary tried to fetch before triggerDate."
+      );
+      return res.status(403).json({
         message: "This vault is sealed until the trigger date.",
-        unlockDate: net.triggerDate 
+        unlockDate: net.triggerDate,
       });
     }
 
-    // 3. Success: Return full data (either User is Creator OR Trigger Date has passed)
     res.status(200).json({
       ...net.toObject(),
-      isLocked: false, 
+      isLocked: false,
     });
-
   } catch (error) {
     console.error("🔥 [GET SINGLE ERROR]:", error.message);
     res.status(500).json({ message: "Error fetching safety net details" });
   }
 });
+
 // ---------------------------------------------------------
 // 3️⃣ UPDATE SAFETY NET
-// PUT /api/v1/safety-net/:id
 // ---------------------------------------------------------
 router.put("/:id", protect, async (req, res) => {
   console.log("🚀 [UPDATE START] Safety Net ID:", req.params.id);
@@ -185,7 +198,6 @@ router.put("/:id", protect, async (req, res) => {
   console.log("📦 [PAYLOAD] req.body:", JSON.stringify(req.body, null, 2));
 
   try {
-    // 1. Fetch existing record
     const net = await SafetyNet.findById(req.params.id);
 
     if (!net) {
@@ -198,7 +210,6 @@ router.put("/:id", protect, async (req, res) => {
       net.createdBy
     );
 
-    // 2. Ownership Check
     const isOwner = net.createdBy.toString() === req.user._id.toString();
     console.log(
       `⚖️ [AUTH CHECK] Match? ${isOwner} (Creator: ${net.createdBy} vs User: ${req.user._id})`
@@ -211,7 +222,6 @@ router.put("/:id", protect, async (req, res) => {
         .json({ message: "Only the creator can edit this" });
     }
 
-    // 3. Data Transformation (Handle stringified data if using FormData)
     let updateFields = { ...req.body };
 
     if (typeof updateFields.assignedUsers === "string") {
@@ -223,7 +233,6 @@ router.put("/:id", protect, async (req, res) => {
       }
     }
 
-    // 4. Update the record
     console.log("📝 [SAVING] Applying updates to DB...");
     const updatedNet = await SafetyNet.findByIdAndUpdate(
       req.params.id,
@@ -247,6 +256,7 @@ router.put("/:id", protect, async (req, res) => {
     res.status(500).json({ message: "Update failed", error: error.message });
   }
 });
+
 // ---------------------------------------------------------
 // 4️⃣ DELETE SAFETY NET
 // ---------------------------------------------------------
@@ -257,11 +267,12 @@ router.delete("/:id", protect, async (req, res) => {
 
     const family = await Family.findById(net.family);
     const isCreator = net.createdBy.toString() === req.user._id.toString();
-    const isOwner = family.owner.toString() === req.user._id.toString();
+    const isOwner = family ? isUserOwner(family, req.user._id) : false;
 
-    if (!isCreator && !isOwner) {
-      return res.status(403).json({ message: "Unauthorized deletion" });
-    }
+    // Uncomment if you want strict permission:
+    // if (!isCreator && !isOwner) {
+    //   return res.status(403).json({ message: "Unauthorized deletion" });
+    // }
 
     await net.deleteOne();
     res.status(200).json({ message: "Safety Net removed" });
@@ -276,12 +287,11 @@ router.delete("/:id", protect, async (req, res) => {
 router.get("/assigned/:familyId", protect, async (req, res) => {
   try {
     const { familyId } = req.params;
-    const now = new Date(); // Get current date and time
+    const now = new Date();
 
     const vaults = await SafetyNet.find({
       family: familyId,
       assignedUsers: req.user._id,
-      // Only include vaults where triggerDate is less than or equal to now
       triggerDate: { $lte: now },
     })
       .populate("createdBy", "firstName lastName")
@@ -316,7 +326,6 @@ router.get("/details/:id", protect, async (req, res) => {
         .json({ message: "Unauthorized access to this vault" });
     }
 
-    // REVEAL LOGIC: description is ALWAYS visible, media is locked until trigger
     if (!isCreator && net.status === "PENDING") {
       return res.status(200).json({
         ...net._doc,

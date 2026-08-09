@@ -20,7 +20,6 @@ const FamilySchema = new mongoose.Schema(
       ],
       required: true,
     },
-    // Add to FamilySchema
     status: {
       type: String,
       enum: ["active", "suspended"],
@@ -30,11 +29,12 @@ const FamilySchema = new mongoose.Schema(
       type: String,
       maxLength: 500,
     },
-    owner: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
+    owner: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
     members: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -47,7 +47,18 @@ const FamilySchema = new mongoose.Schema(
         ref: "User",
       },
     ],
-    joinRequests: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    joinRequests: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
+    suspendedMembers: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
     inviteCode: {
       type: String,
       unique: true,
@@ -56,6 +67,9 @@ const FamilySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-FamilySchema.index({ owner: 1, members: 1 });
+// ✅ Correct indexes (no parallel arrays)
+FamilySchema.index({ owner: 1 });
+FamilySchema.index({ members: 1 });
+FamilySchema.index({ inviteCode: 1 });
 
 module.exports = mongoose.model("Family", FamilySchema);

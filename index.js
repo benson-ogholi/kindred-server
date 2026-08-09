@@ -22,6 +22,7 @@ const contentRoutes = require("./routes/familyContent");
 const { uploadToBackblaze } = require("./utils/uploadToBackblaze");
 const familyMembers = require("./routes/familyMembers");
 const User = require("./models/User");
+const aiAnalysisRoutes = require("./routes/aiAnalysis");
 const SafetyNet = require("./routes/safetyNet");
 const adminRoutes = require("./routes/adminRoutes");
 const dashboardRouter = require("./routes/dashboardRoutes");
@@ -56,6 +57,8 @@ const pru_wallet = require("./routes/padiman_utility/pru.wallet.route");
 const Request = require("./models/padiman_route_models/Request");
 const STATUS_COPY = require("./constants/pr/statusCopy");
 const pru_home = require("./routes/padiman_utility/pru.home.routes");
+const { sendPushNotificationToUser } = require("./utils/notifyUser");
+const { protect, checkStatus } = require("./middlewares/authMiddleware");
 
 const app = express();
 const server = http.createServer(app);
@@ -91,6 +94,7 @@ app.use("/api/v1/dashboard", dashboardRouter);
 app.use("/api/v1/admin-user", adminUserRoutes);
 app.use("/api/v1/admin-family", adminFamilyRoutes);
 app.use("/api/v1/admin-finance", adminFinanceRoutes);
+app.use("/api/v1/ai", protect, checkStatus, aiAnalysisRoutes);
 
 app.use("/api/v1/padiman_route/auth", pr_auth);
 app.use("/api/v1/padiman_route/user", pr_user);
@@ -1507,7 +1511,7 @@ io.on("connection", (socket) => {
               },
             },
             latestSenderName: { $first: "$senderName" },
-            profilePicture: { $first: "$receiverProfilePicture" },
+            // ❌ removed the old profilePicture from messages
             unreadCount: {
               $sum: {
                 $cond: [
@@ -1549,7 +1553,10 @@ io.on("connection", (socket) => {
             lastMessage: 1,
             timestamp: 1,
             unreadCount: 1,
-            profilePicture: 1,
+            // ✅ always the latest profile picture from the users collection
+            profilePicture: {
+              $ifNull: ["$userDetails.profilePicture", null], // change field name if yours is different
+            },
             senderId: "$otherPersonId",
             receiverId: { $literal: userId },
             senderName: {
@@ -1606,45 +1613,594 @@ io.on("connection", (socket) => {
       .emit("user_typing", { roomUuid: data.uuid, isTyping: false });
   });
 
-  socket.on("start_call", async ({ to, offer, fromName, fromId }) => {
-    console.log(
-      `📞 [start_call] Call initiated from: ${fromId} (${fromName}) to socket/room: ${to}`
-    );
-    io.to(to).emit("incoming_call", { offer, fromName, fromId });
-  });
+  // ===================== CALL SYSTEM =====================
+  const onlineUsers = new Map(); // userId -> socketId
+  const activeCalls = new Map(); // roomId -> { answered, startTime, answerTime, callerId, receiverId, callerName }
 
-  socket.on("answer_call", ({ to, answer }) => {
-    console.log(`📞 [answer_call] Call answered, sending answer to: ${to}`);
-    io.to(to).emit("call_answered", { answer });
-  });
+  const formatCallDuration = (totalSeconds) => {
+    const hrs = Math.floor(totalSeconds / 3600);
+    const mins = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
 
-  socket.on("ice_candidate", ({ to, candidate }) => {
-    console.log(`❄️ [ice_candidate] Relaying ICE Candidate to: ${to}`);
-    io.to(to).emit("ice_candidate", { candidate });
-  });
+    const parts = [];
+    if (hrs > 0) parts.push(`${hrs}h`);
+    if (mins > 0 || hrs > 0) parts.push(`${mins}m`);
+    parts.push(`${secs}s`);
 
-  socket.on("end_call", ({ to }) => {
-    console.log(`🛑 [end_call] Ending call, notifying: ${to}`);
-    io.to(to).emit("call_ended");
-  });
+    return parts.join(" ");
+  };
 
-  // 8. Disconnect Handler
-  socket.on("disconnect", async () => {
-    console.log(`🔌 [disconnect] Socket disconnected: ${socket.id}`);
+  const createCallMessage = async ({
+    roomUuid,
+    callerId,
+    receiverId,
+    callerName,
+    status,
+    duration = 0,
+  }) => {
     try {
-      const user = await User.findOne({ socketId: socket.id });
-      if (user) {
-        user.socketId = null;
-        user.isOnline = false;
-        await user.save();
-        console.log(`🔴 [disconnect] User ${user._id} marked offline in DB`);
+      const messageUuid = `call-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 9)}`;
+
+      let text = "";
+      if (status === "missed") {
+        text = "Missed voice call";
+      } else if (status === "rejected") {
+        text = "Call declined";
       } else {
-        console.log(
-          `⚠️ [disconnect] Socket ${socket.id} disconnected but no linked user was found in DB.`
+        // status === "ended"
+        text =
+          duration > 0
+            ? `Call ended • ${formatCallDuration(duration)}`
+            : "Call ended";
+      }
+
+      const newMessage = new Message({
+        roomUuid,
+        message: text,
+        senderName: callerName || "System",
+        senderId: callerId,
+        receiverId,
+        messageUuid,
+        messageType: "call",
+        timestamp: new Date(),
+        isRead: false,
+      });
+
+      await newMessage.save();
+
+      io.to(roomUuid).emit("receive_message", {
+        uuid: messageUuid,
+        message: text,
+        senderName: callerName || "System",
+        senderId: callerId,
+        timestamp: newMessage.timestamp.toISOString(),
+        messageType: "call",
+        callStatus: status,
+        duration,
+        status: "sent",
+      });
+
+      const unreadCount = await Message.countDocuments({
+        receiverId,
+        isRead: false,
+      });
+      io.to(roomUuid).emit("unread_update", {
+        roomUuid,
+        unreadCount,
+        lastMessage: text,
+      });
+    } catch (err) {
+      console.error("[CALL-MSG:ERROR]", err);
+    }
+  };
+  const finalizeCall = async (roomId) => {
+    const callInfo = activeCalls.get(roomId);
+    if (!callInfo) return;
+
+    const duration = callInfo.answered
+      ? Math.floor(
+          (Date.now() - (callInfo.answerTime || callInfo.startTime)) / 1000
+        )
+      : 0;
+    const status = callInfo.answered ? "ended" : "missed";
+
+    await createCallMessage({
+      roomUuid: roomId,
+      callerId: callInfo.callerId,
+      receiverId: callInfo.receiverId,
+      callerName: callInfo.callerName,
+      status,
+      duration,
+    });
+
+    activeCalls.delete(roomId);
+
+    try {
+      const userIds = [callInfo.callerId, callInfo.receiverId].filter(Boolean);
+      if (userIds.length > 0) {
+        await User.updateMany(
+          { _id: { $in: userIds } },
+          { $set: { isOncall: false } }
         );
       }
     } catch (err) {
-      console.error("❌ [disconnect] Disconnect database error:", err);
+      console.error("[CALL-FINALIZE:DB-ERROR]", err);
+    }
+  };
+
+  // Single register_user — handles BOTH the in-memory map (used for
+  // live incoming-call routing) and the persisted online/socketId status.
+  socket.on("register_user", async ({ userId }) => {
+    if (!userId) return;
+    const cleanUserId = userId.toString();
+    onlineUsers.set(cleanUserId, socket.id);
+    socket.userId = cleanUserId;
+
+    try {
+      const user = await User.findById(cleanUserId);
+      if (user) {
+        user.socketId = socket.id;
+        user.isOnline = true;
+        await user.save();
+      }
+    } catch (err) {
+      console.error("[register_user] DB update failed:", err);
+    }
+  });
+
+  socket.on("kookohor-join-room", async (data) => {
+    const roomId = typeof data === "object" ? data.roomId : data;
+    const callerId = data?.callerId ? data.callerId.toString() : undefined;
+    const receiverId = data?.receiverId
+      ? data.receiverId.toString()
+      : undefined;
+
+    if (!roomId) return;
+
+    socket.join(roomId);
+    socket.roomId = roomId;
+    socket.callerId = callerId;
+    socket.receiverId = receiverId;
+
+    try {
+      const userIds = [callerId, receiverId].filter(Boolean);
+      if (userIds.length > 0) {
+        await User.updateMany(
+          { _id: { $in: userIds } },
+          { $set: { isOncall: true } }
+        );
+      }
+
+      if (roomId && callerId && !activeCalls.has(roomId)) {
+        const callerUser = await User.findById(callerId).select(
+          "firstName lastName fullName profilePicture"
+        );
+        const callerName = callerUser
+          ? `${callerUser.firstName || ""} ${
+              callerUser.lastName || ""
+            }`.trim() ||
+            callerUser.fullName ||
+            "Someone"
+          : "Someone";
+
+        activeCalls.set(roomId, {
+          answered: false,
+          startTime: Date.now(),
+          callerId,
+          receiverId: receiverId || "room-participant",
+          callerName,
+        });
+      }
+
+      // 🎯 Ring the specific receiver directly using their registered socket ID
+      if (receiverId) {
+        const targetSocketId = onlineUsers.get(receiverId.toString());
+
+        const callerUser = await User.findById(callerId).select(
+          "firstName lastName fullName profilePicture"
+        );
+        const callerName = callerUser
+          ? `${callerUser.firstName || ""} ${
+              callerUser.lastName || ""
+            }`.trim() ||
+            callerUser.fullName ||
+            "Someone"
+          : "Someone";
+
+        const callPayload = {
+          roomId,
+          callerId,
+          receiverId,
+          receiverName: callerName,
+          receiverProfilePicture: callerUser?.profilePicture || "",
+          isCaller: false, // Target user is receiving the call
+        };
+
+        if (targetSocketId) {
+          console.log(
+            `🎯 [kookohor-join-room] Ringing target user socket directly: ${targetSocketId} for receiver: ${receiverId}`
+          );
+          io.to(targetSocketId).emit("incoming-call", callPayload);
+        } else {
+          // Fallback if not currently in map, try looking up from DB user document
+          const receiverUser = await User.findById(receiverId);
+          if (receiverUser?.socketId) {
+            console.log(
+              `🎯 [kookohor-join-room] Ringing target user via DB socketId: ${receiverUser.socketId}`
+            );
+            io.to(receiverUser.socketId).emit("incoming-call", callPayload);
+          } else {
+            console.warn(
+              `⚠️ [kookohor-join-room] Receiver ${receiverId} is not connected online.`
+            );
+          }
+        }
+
+        // Trigger push notification as backup/offline support
+        sendPushNotificationToUser(receiverId, {
+          title: "Incoming Call 📞",
+          body: `${callerName} is calling you...`,
+          router: "/call/audio-call",
+          data: {
+            type: "INCOMING_CALL",
+            roomId,
+            callerId,
+            receiverId,
+            callerName,
+            callerProfilePicture: callerUser?.profilePicture || "",
+          },
+        }).catch((err) => console.error("[JOIN-ROOM] push failed:", err));
+      }
+    } catch (err) {
+      console.error("❌ [kookohor-join-room] error:", err);
+    }
+
+    socket.to(roomId).emit("kookohor-user-connected", {
+      socketId: socket.id,
+      callerId,
+      receiverId,
+    });
+  });
+  socket.on("kookohor-offer", ({ offer, roomId, targetSocketId }) => {
+    const target = targetSocketId || roomId || socket.roomId;
+    if (target)
+      socket
+        .to(target)
+        .emit("kookohor-offer", { offer, senderSocketId: socket.id });
+  });
+
+  socket.on("kookohor-answer", ({ answer, roomId, targetSocketId }) => {
+    const target = targetSocketId || roomId || socket.roomId;
+    if (target)
+      socket
+        .to(target)
+        .emit("kookohor-answer", { answer, senderSocketId: socket.id });
+
+    // 🎯 The receiver just answered — mark the call as answered on the server
+    // so finalizeCall() logs it as "ended" (with real duration) instead of "missed".
+    const activeRoomId = roomId || socket.roomId;
+    if (activeRoomId && activeCalls.has(activeRoomId)) {
+      const info = activeCalls.get(activeRoomId);
+      if (!info.answered) {
+        info.answered = true;
+        info.answerTime = Date.now();
+      }
+    }
+  });
+  socket.on(
+    "kookohor-ice-candidate",
+    ({ candidate, roomId, targetSocketId }) => {
+      const target = targetSocketId || roomId || socket.roomId;
+      if (target)
+        socket.to(target).emit("kookohor-ice-candidate", {
+          candidate,
+          senderSocketId: socket.id,
+        });
+    }
+  );
+
+  socket.on("kookohor-end-call", async (data) => {
+    const roomId = data?.roomId || socket.roomId;
+    if (!roomId) return;
+
+    await finalizeCall(roomId);
+    io.to(roomId).emit("call-ended", { roomId });
+
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (room) {
+      for (const sid of room) {
+        const s = io.sockets.sockets.get(sid);
+        if (s) s.leave(roomId);
+      }
+    }
+  });
+
+  socket.on("disconnect", async () => {
+    if (socket.userId) {
+      onlineUsers.delete(socket.userId);
+      try {
+        const user = await User.findById(socket.userId);
+        if (user && user.socketId === socket.id) {
+          user.isOnline = false;
+          await user.save();
+        }
+      } catch (err) {
+        console.error("[disconnect] DB update failed:", err);
+      }
+    }
+
+    const roomId = socket.roomId;
+    if (!roomId) return;
+
+    const room = io.sockets.adapter.rooms.get(roomId);
+    const roomEmpty = !room || room.size === 0;
+
+    // Call was still active when this socket dropped — log it as missed/ended
+    // instead of it just silently vanishing from the chat.
+    if (activeCalls.has(roomId)) {
+      await finalizeCall(roomId);
+    } else if (roomEmpty) {
+      const userIds = [socket.callerId, socket.receiverId].filter(Boolean);
+      if (userIds.length > 0) {
+        try {
+          await User.updateMany(
+            { _id: { $in: userIds } },
+            { $set: { isOncall: false } }
+          );
+        } catch (err) {
+          console.error("[disconnect] isOncall reset failed:", err);
+        }
+      }
+    }
+
+    if (!roomEmpty) {
+      socket.to(roomId).emit("call-ended", { reason: "peer-disconnected" });
+    }
+  });
+
+  // 7. Get Call History / All Calls
+  socket.on("get_calls", async ({ userId }) => {
+    console.log(`📥 [get_calls] Fetching call history for user: ${userId}`);
+    try {
+      const calls = await Message.aggregate([
+        {
+          $match: {
+            messageType: "call",
+            $or: [{ senderId: userId }, { receiverId: userId }],
+          },
+        },
+        { $sort: { timestamp: -1 } },
+        {
+          $addFields: {
+            otherUserId: {
+              $cond: [
+                { $eq: ["$senderId", userId] },
+                "$receiverId",
+                "$senderId",
+              ],
+            },
+          },
+        },
+        {
+          $addFields: {
+            otherUserObjectId: { $toObjectId: "$otherUserId" },
+          },
+        },
+        {
+          $lookup: {
+            from: "users",
+            localField: "otherUserObjectId",
+            foreignField: "_id",
+            as: "userDetails",
+          },
+        },
+        {
+          $unwind: {
+            path: "$userDetails",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $project: {
+            uuid: { $ifNull: ["$messageUuid", "$uuid"] },
+            roomUuid: 1,
+            message: 1,
+            senderId: 1,
+            receiverId: 1,
+            otherUserId: 1,
+            timestamp: {
+              $ifNull: ["$timestamp", "$$NOW"],
+            },
+            messageType: { $literal: "call" },
+            callStatus: { $ifNull: ["$callStatus", "ended"] },
+            duration: { $ifNull: ["$duration", 0] },
+            isCaller: { $eq: ["$senderId", userId] },
+            // Mapped parameters to match your click-to-call navigation parameters
+            roomId: "$roomUuid",
+            callerId: { $literal: userId },
+            receiverId: "$otherUserId",
+            receiverName: {
+              $cond: [
+                { $ifNull: ["$userDetails", false] },
+                {
+                  $concat: [
+                    "$userDetails.firstName",
+                    " ",
+                    "$userDetails.lastName",
+                  ],
+                },
+                "$senderName",
+              ],
+            },
+            receiverProfilePicture: {
+              $ifNull: ["$userDetails.profilePicture", ""],
+            },
+          },
+        },
+        { $sort: { timestamp: -1 } },
+      ]);
+
+      const mappedCalls = calls.map((call) => ({
+        ...call,
+        timestamp:
+          call.timestamp instanceof Date
+            ? call.timestamp.toISOString()
+            : new Date(call.timestamp).toISOString(),
+        isCaller: "true",
+      }));
+
+      console.log(
+        `📤 [get_calls] Emitting 'calls_list' (Count: ${mappedCalls.length}) to socket ${socket.id}`
+      );
+      socket.emit("calls_list", mappedCalls);
+    } catch (err) {
+      console.error("❌ [get_calls] Error fetching calls:", err);
+      socket.emit("error", { message: "Failed to fetch call history" });
+    }
+  });
+
+  // 8. Get Conversations / Inbox
+  socket.on("get_conversations", async ({ userId }) => {
+    console.log(
+      `📥 [get_conversations] Fetching inbox conversations for user: ${userId}`
+    );
+    try {
+      const conversations = await Message.aggregate([
+        { $match: { $or: [{ senderId: userId }, { receiverId: userId }] } },
+        { $sort: { timestamp: -1 } },
+        {
+          $group: {
+            _id: "$roomUuid",
+            lastMessage: { $first: "$message" },
+            timestamp: { $first: "$timestamp" },
+            otherPersonId: {
+              $first: {
+                $cond: [
+                  { $eq: ["$senderId", userId] },
+                  "$receiverId",
+                  "$senderId",
+                ],
+              },
+            },
+            latestSenderName: { $first: "$senderName" },
+            unreadCount: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$receiverId", userId] },
+                      { $eq: ["$isRead", false] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
+        {
+          $addFields: {
+            otherPersonObjectId: { $toObjectId: "$otherPersonId" },
+          },
+        },
+        {
+          $lookup: {
+            from: "users",
+            localField: "otherPersonObjectId",
+            foreignField: "_id",
+            as: "userDetails",
+          },
+        },
+        {
+          $unwind: {
+            path: "$userDetails",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $project: {
+            _id: 1,
+            lastMessage: 1,
+            timestamp: 1,
+            unreadCount: 1,
+            profilePicture: {
+              $ifNull: ["$userDetails.profilePicture", null],
+            },
+            senderId: "$otherPersonId",
+            receiverId: { $literal: userId },
+            senderName: {
+              $cond: [
+                { $ifNull: ["$userDetails", false] },
+                {
+                  $concat: [
+                    "$userDetails.firstName",
+                    " ",
+                    "$userDetails.lastName",
+                  ],
+                },
+                "$latestSenderName",
+              ],
+            },
+          },
+        },
+        { $sort: { timestamp: -1 } },
+      ]);
+
+      console.log(
+        "📂 [get_conversations] UPDATED INBOX DATA EXTRACTED SUCCESSFULLY:",
+        JSON.stringify(conversations, null, 2)
+      );
+
+      socket.emit("conversations_list", conversations);
+      console.log(
+        `✅ [get_conversations] Emitted 'conversations_list' to socket ${socket.id}`
+      );
+    } catch (err) {
+      console.error(
+        "❌ [get_conversations] Error fetching conversations:",
+        err
+      );
+    }
+  });
+
+  socket.on("disconnect", async () => {
+    console.log(
+      `[disconnect] Socket ${socket.id} disconnected from room ${socket.roomId}`
+    );
+
+    // Remove from online map
+    if (socket.userId) {
+      onlineUsers.delete(socket.userId);
+    }
+
+    const roomId = socket.roomId;
+    if (!roomId) return;
+
+    // Only reset isOncall if the room is now empty
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (!room || room.size === 0) {
+      const userIds = [socket.callerId, socket.receiverId].filter(Boolean);
+      if (userIds.length > 0) {
+        try {
+          await User.updateMany(
+            { _id: { $in: userIds } },
+            { $set: { isOncall: false } }
+          );
+          console.log(
+            `[db] Reset isOncall = false on empty room for users: ${userIds.join(
+              ", "
+            )}`
+          );
+        } catch (err) {
+          console.error("[db-error] disconnect isOncall reset failed:", err);
+        }
+      }
+    } else {
+      // Tell the remaining peer that the other side left
+      socket.to(roomId).emit("call-ended", { reason: "peer-disconnected" });
     }
   });
 });

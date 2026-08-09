@@ -18,6 +18,53 @@ const Contribution = require("../models/Contribution");
 const SafetyNet = require("../models/SafetyNet");
 const { sendPushNotificationToUser } = require("../utils/notifyUser");
 
+// Helper: normalize owner to always be an array
+
+const dropBadIndex = async () => {
+  try {
+    // Try both possible names
+    await Family.collection.dropIndex("owner_1_members_1");
+    console.log("✅ Dropped index owner_1_members_1");
+  } catch (err) {
+    console.log("Index owner_1_members_1 not found or already dropped");
+  }
+
+  try {
+    await Family.collection.dropIndex({ owner: 1, members: 1 });
+    console.log("✅ Dropped index { owner: 1, members: 1 }");
+  } catch (err) {
+    console.log("Compound index already gone");
+  }
+
+  console.log("Current indexes:");
+  console.log(await Family.collection.indexes());
+};
+
+const ensureOwnerArray = (family) => {
+  if (!family) return family;
+
+  if (Array.isArray(family.owner)) {
+    return family;
+  }
+
+  // Convert single ObjectId → array
+  family.owner = family.owner ? [family.owner] : [];
+  return family;
+};
+
+// Helper: check if userId is an owner
+const isUserOwner = (family, userId) => {
+  const owners = Array.isArray(family.owner)
+    ? family.owner
+    : family.owner
+    ? [family.owner]
+    : [];
+  return owners.some((o) => {
+    const id = o._id ? o._id.toString() : o.toString();
+    return id === userId.toString();
+  });
+};
+
 // 1. CREATE A FAMILY
 router.post("/", protect, checkStatus, async (req, res) => {
   try {
@@ -29,12 +76,11 @@ router.post("/", protect, checkStatus, async (req, res) => {
       familyName: familyName.trim(),
       familyType,
       description: description?.trim() || "",
-      owner: req.user._id,
+      owner: [req.user._id], // array
       members: [req.user._id],
       inviteCode: Math.random().toString(36).substring(2, 10).toUpperCase(),
     });
 
-    
     const populatedFamily = await Family.findById(newFamily._id)
       .populate("owner", "firstName lastName email profilePicture")
       .populate("members", "firstName lastName email profilePicture");
@@ -62,19 +108,15 @@ router.get("/", protect, checkStatus, async (req, res) => {
 
     const enrichedFamilies = await Promise.all(
       families.map(async (f) => {
-        const family = f.toObject();
+        const family = ensureOwnerArray(f.toObject());
 
-        // -------------------------
         // FLAGS
-        // -------------------------
-        const isOwner = family.owner._id.toString() === userIdStr;
+        const isOwner = isUserOwner(family, userIdStr);
         const isMember = family.members.some(
           (m) => m._id.toString() === userIdStr
         );
 
-        // -------------------------
         // GLOBAL UNREAD COUNTS
-        // -------------------------
         const [tasks, polls, suggestions, reports, news] = await Promise.all([
           Task.countDocuments({
             family: family._id,
@@ -107,9 +149,7 @@ router.get("/", protect, checkStatus, async (req, res) => {
           news,
         };
 
-        // -------------------------
         // CONTENT STATUS
-        // -------------------------
         const contentUnreadData = await FamilyContent.aggregate([
           {
             $match: {
@@ -171,7 +211,7 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
   try {
     const currentUserId = req.user._id;
     const currentUserIdStr = currentUserId.toString();
-
+    await dropBadIndex();
     const familyDoc = await Family.findById(req.params.id)
       .populate("owner", "firstName lastName email profilePicture isOnline")
       .populate("members", "firstName lastName email profilePicture isOnline");
@@ -180,21 +220,23 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
       return res.status(404).json({ message: "Family not found" });
     }
 
-    // 🔹 Permissions
-    const isOwner = familyDoc.owner._id.toString() === currentUserIdStr;
-    const isMember = familyDoc.members.some(
+    const familyObj = ensureOwnerArray(familyDoc.toObject());
+
+    // Permissions
+    const isOwner = isUserOwner(familyObj, currentUserIdStr);
+    const isMember = familyObj.members.some(
       (m) => m._id.toString() === currentUserIdStr
     );
     const isInviteSent =
-      familyDoc.pendingInvites?.some(
+      familyObj.pendingInvites?.some(
         (id) => id.toString() === currentUserIdStr
       ) || false;
     const isJoinRequestSent =
-      familyDoc.joinRequests?.some(
+      familyObj.joinRequests?.some(
         (id) => id.toString() === currentUserIdStr
       ) || false;
 
-    // 🔹 Global Feature Counts
+    // Global Feature Counts
     const [
       globalTasks,
       globalPolls,
@@ -202,7 +244,7 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
       globalReports,
       globalNews,
       unreadCampaigns,
-      globalSafetyNets, // 🔥 NEW: Unread Safety Nets
+      globalSafetyNets,
     ] = await Promise.all([
       Task.countDocuments({
         family: familyDoc._id,
@@ -225,21 +267,19 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
         family: familyDoc._id,
         isRead: { $ne: currentUserId },
       }),
-      // ✅ Unread DonationCampaigns
       DonationCampaign.countDocuments({
         family: familyDoc._id,
         isRead: { $ne: currentUserId },
       }),
-      // 🔥 NEW: Count Released Safety Nets assigned to user that haven't been read
       SafetyNet.countDocuments({
         family: familyDoc._id,
         assignedUsers: currentUserId,
-        status: "RELEASED", // Only count as unread if they can actually see the content
+        status: "RELEASED",
         isRead: { $ne: currentUserId },
       }),
     ]);
 
-    // 🔥 Count unread Contributions
+    // Unread Contributions
     const unreadContributionsAgg = await Contribution.aggregate([
       {
         $lookup: {
@@ -258,13 +298,11 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
       },
       { $count: "count" },
     ]);
-
     const unreadContributions =
       unreadContributionsAgg.length > 0 ? unreadContributionsAgg[0].count : 0;
-
     const totalUnreadDonations = unreadCampaigns + unreadContributions;
 
-    // 🔹 FamilyContent Type Counts
+    // FamilyContent Type Counts
     const contentUnreadData = await FamilyContent.aggregate([
       {
         $match: {
@@ -303,11 +341,10 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
       hasUnread: (contentUnreadMap[type] || 0) > 0,
     }));
 
-    // 🔹 Prepare members
+    // Prepare members
     const membersWithUUIDAndUnreadCounts = await Promise.all(
       (familyDoc.members || []).map(async (member) => {
         const memberId = member._id.toString();
-
         if (memberId === currentUserIdStr) {
           return {
             ...member.toObject(),
@@ -319,7 +356,7 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
               reports: 0,
               news: 0,
               donations: 0,
-              safetyNets: 0, // NEW
+              safetyNets: 0,
             },
           };
         }
@@ -328,7 +365,6 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
         let unified = await UnifiedIds.findOne({
           users: { $size: 2, $all: usersPair },
         });
-
         if (!unified) {
           unified = await UnifiedIds.create({
             users: usersPair,
@@ -360,10 +396,9 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
       })
     );
 
-    // 🔹 Final Assembly
-    const family = familyDoc.toObject();
+    // Final Assembly
+    const family = familyObj;
     family.members = membersWithUUIDAndUnreadCounts;
-
     family.unreadSummary = {
       tasks: globalTasks,
       polls: globalPolls,
@@ -371,9 +406,8 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
       reports: globalReports,
       news: globalNews,
       donations: totalUnreadDonations,
-      safetyNets: globalSafetyNets, // 🔥 NEW: Added to summary
+      safetyNets: globalSafetyNets,
     };
-
     family.contentStatus = contentStatus;
     family.isMember = isMember;
     family.isNotMember = !(isOwner || isMember);
@@ -389,6 +423,7 @@ router.get("/:id", protect, checkStatus, async (req, res) => {
     res.status(500).json({ message: "Server error fetching family details" });
   }
 });
+
 // 4. LOOKUP FAMILY BY INVITE CODE
 router.get("/invite/:inviteCode", protect, checkStatus, async (req, res) => {
   try {
@@ -401,15 +436,16 @@ router.get("/invite/:inviteCode", protect, checkStatus, async (req, res) => {
     if (!familyDoc)
       return res.status(404).json({ message: "Invalid invite code" });
 
+    const family = ensureOwnerArray(familyDoc.toObject());
     const userId = req.user._id.toString();
-    const isOwner = familyDoc.owner._id.toString() === userId;
-    const isMember = familyDoc.members.some((m) => m._id.toString() === userId);
-    const isInviteSent =
-      familyDoc.pendingInvites?.some((id) => id.toString() === userId) || false;
-    const isJoinRequestSent =
-      familyDoc.joinRequests?.some((id) => id.toString() === userId) || false;
 
-    const family = familyDoc.toObject();
+    const isOwner = isUserOwner(family, userId);
+    const isMember = family.members.some((m) => m._id.toString() === userId);
+    const isInviteSent =
+      family.pendingInvites?.some((id) => id.toString() === userId) || false;
+    const isJoinRequestSent =
+      family.joinRequests?.some((id) => id.toString() === userId) || false;
+
     family.isMember = isMember;
     family.isNotMember = !(isOwner || isMember);
     family.isInviteSent = isInviteSent;
@@ -425,8 +461,13 @@ router.get("/invite/:inviteCode", protect, checkStatus, async (req, res) => {
 router.put("/:id", protect, checkStatus, async (req, res) => {
   try {
     const family = await Family.findById(req.params.id);
-    if (!family || family.owner.toString() !== req.user._id.toString())
+    if (!family) return res.status(404).json({ message: "Family not found" });
+
+    ensureOwnerArray(family);
+
+    if (!isUserOwner(family, req.user._id)) {
       return res.status(403).json({ message: "Unauthorized" });
+    }
 
     const updatedFamily = await Family.findByIdAndUpdate(
       req.params.id,
@@ -446,8 +487,14 @@ router.put("/:id", protect, checkStatus, async (req, res) => {
 router.delete("/:id", protect, checkStatus, async (req, res) => {
   try {
     const family = await Family.findById(req.params.id);
-    if (!family || family.owner.toString() !== req.user._id.toString())
+    if (!family) return res.status(404).json({ message: "Family not found" });
+
+    ensureOwnerArray(family);
+
+    if (!isUserOwner(family, req.user._id)) {
       return res.status(403).json({ message: "Unauthorized" });
+    }
+
     await family.deleteOne();
     res.status(200).json({ message: "Family deleted" });
   } catch (error) {
@@ -455,6 +502,7 @@ router.delete("/:id", protect, checkStatus, async (req, res) => {
   }
 });
 
+// NEW INVITE BY EMAIL
 router.post("/new-invite/send", protect, checkStatus, async (req, res) => {
   console.log("📩 INVITE ROUTE HIT");
   console.log("➡️ Request body:", req.body);
@@ -479,8 +527,10 @@ router.post("/new-invite/send", protect, checkStatus, async (req, res) => {
       return res.status(404).json({ message: "Family not found" });
     }
 
-    // 🔐 Only owner can invite
-    if (String(family.owner) !== String(req.user._id)) {
+    ensureOwnerArray(family);
+
+    // Only an owner can invite
+    if (!isUserOwner(family, req.user._id)) {
       console.log("🚫 Unauthorized invite attempt by:", req.user._id);
       return res.status(403).json({ message: "Unauthorized" });
     }
@@ -489,19 +539,17 @@ router.post("/new-invite/send", protect, checkStatus, async (req, res) => {
 
     for (const email of emailList) {
       console.log("➡️ Processing email:", email);
-
       const normalizedEmail = email.toLowerCase().trim();
       console.log("🔤 Normalized email:", normalizedEmail);
 
       const user = await User.findOne({ email: normalizedEmail });
       console.log("👤 User lookup result:", user?._id || "NON-USER");
 
-      // 🧍 EXISTING USER
+      // EXISTING USER
       if (user) {
         const alreadyMember = family.members.some(
           (id) => id.toString() === user._id.toString()
         );
-
         const alreadyInvited = family.pendingInvites?.some(
           (id) => id.toString() === user._id.toString()
         );
@@ -518,11 +566,11 @@ router.post("/new-invite/send", protect, checkStatus, async (req, res) => {
           continue;
         }
 
-        // ➕ Add to pending invites
+        // Add to pending invites
         family.pendingInvites.push(user._id);
         console.log("➕ Added to pendingInvites:", user._id);
 
-        // 🔔 CREATE IN-APP NOTIFICATION
+        // CREATE IN-APP NOTIFICATION
         console.log("🔔 Creating in-app notification for user:", user._id);
         await createFamilyNotifications(familyId, req.user._id, {
           type: "FAMILY_INVITE",
@@ -534,7 +582,7 @@ router.post("/new-invite/send", protect, checkStatus, async (req, res) => {
         console.log("✅ Notification created");
       }
 
-      // 📧 SEND EMAIL (USER OR NON-USER)
+      // SEND EMAIL (USER OR NON-USER)
       console.log("📧 Sending invite email to:", normalizedEmail);
       await sendInviteEmail({
         to: normalizedEmail,
@@ -553,7 +601,6 @@ router.post("/new-invite/send", protect, checkStatus, async (req, res) => {
     console.log("💾 Saving family with updated pendingInvites");
     await family.save();
     console.log("✅ Family saved");
-
     console.log("📤 Final response results:", results);
 
     res.status(200).json({
@@ -572,15 +619,22 @@ router.post("/:familyId/invite", protect, checkStatus, async (req, res) => {
   try {
     const { familyId } = req.params;
     const { userId } = req.body;
-    const family = await Family.findById(familyId);
 
-    if (!family || family.owner.toString() !== req.user._id.toString())
+    const family = await Family.findById(familyId);
+    if (!family) return res.status(404).json({ message: "Family not found" });
+
+    ensureOwnerArray(family);
+
+    if (!isUserOwner(family, req.user._id)) {
       return res.status(403).json({ message: "Unauthorized" });
+    }
+
     if (
       family.members.includes(userId) ||
       family.pendingInvites?.includes(userId)
-    )
+    ) {
       return res.status(400).json({ message: "User already involved" });
+    }
 
     family.pendingInvites.push(userId);
     await family.save();
@@ -591,6 +645,7 @@ router.post("/:familyId/invite", protect, checkStatus, async (req, res) => {
       message: `Invited to join "${family.familyName}"`,
       relatedId: familyId,
     });
+
     res.status(200).json({ message: "Invite sent" });
   } catch (error) {
     res.status(500).json({ message: "Server error sending invite" });
@@ -602,8 +657,10 @@ router.post("/:familyId/accept", protect, checkStatus, async (req, res) => {
   try {
     const userId = req.user._id.toString();
     const family = await Family.findById(req.params.familyId);
-    if (!family || !family.pendingInvites?.includes(userId))
+
+    if (!family || !family.pendingInvites?.includes(userId)) {
       return res.status(400).json({ message: "No pending invite" });
+    }
 
     family.members.push(userId);
     family.pendingInvites = family.pendingInvites.filter(
@@ -617,6 +674,7 @@ router.post("/:familyId/accept", protect, checkStatus, async (req, res) => {
       message: `${req.user.firstName} joined "${family.familyName}"`,
       relatedId: req.params.familyId,
     });
+
     res.status(200).json({ message: "Joined successfully", family });
   } catch (error) {
     res.status(500).json({ message: "Server error accepting invite" });
@@ -628,8 +686,10 @@ router.post("/:familyId/decline", protect, checkStatus, async (req, res) => {
   try {
     const userId = req.user._id.toString();
     const family = await Family.findById(req.params.familyId);
-    if (!family || !family.pendingInvites?.includes(userId))
+
+    if (!family || !family.pendingInvites?.includes(userId)) {
       return res.status(400).json({ message: "No invite found" });
+    }
 
     family.pendingInvites = family.pendingInvites.filter(
       (id) => id.toString() !== userId
@@ -642,6 +702,7 @@ router.post("/:familyId/decline", protect, checkStatus, async (req, res) => {
       message: `${req.user.firstName} declined the invitation`,
       relatedId: req.params.familyId,
     });
+
     res.status(200).json({ message: "Invite declined" });
   } catch (error) {
     res.status(500).json({ message: "Server error declining invite" });
@@ -653,6 +714,7 @@ router.post("/:familyId/request", protect, checkStatus, async (req, res) => {
   try {
     const userId = req.user._id.toString();
     const family = await Family.findById(req.params.familyId);
+
     if (!family) return res.status(404).json({ message: "Family not found" });
     if (family.members.includes(userId))
       return res.status(400).json({ message: "Already a member" });
@@ -666,6 +728,7 @@ router.post("/:familyId/request", protect, checkStatus, async (req, res) => {
       message: `${req.user.firstName} wants to join "${family.familyName}"`,
       relatedId: req.params.familyId,
     });
+
     res.status(200).json({ message: "Request sent" });
   } catch (error) {
     res.status(500).json({ message: "Server error requesting join" });
@@ -679,8 +742,15 @@ router.get("/:familyId/requests", protect, checkStatus, async (req, res) => {
       "joinRequests",
       "firstName lastName email profilePicture"
     );
-    if (!family || family.owner.toString() !== req.user._id.toString())
+
+    if (!family) return res.status(404).json({ message: "Family not found" });
+
+    ensureOwnerArray(family);
+
+    if (!isUserOwner(family, req.user._id)) {
       return res.status(403).json({ message: "Unauthorized" });
+    }
+
     res.status(200).json({ joinRequests: family.joinRequests });
   } catch (error) {
     res.status(500).json({ message: "Server error fetching requests" });
@@ -696,8 +766,14 @@ router.post(
     try {
       const { familyId, userId } = req.params;
       const family = await Family.findById(familyId);
-      if (!family || family.owner.toString() !== req.user._id.toString())
+
+      if (!family) return res.status(404).json({ message: "Family not found" });
+
+      ensureOwnerArray(family);
+
+      if (!isUserOwner(family, req.user._id)) {
         return res.status(403).json({ message: "Unauthorized" });
+      }
 
       family.members.push(userId);
       family.joinRequests = family.joinRequests.filter(
@@ -711,6 +787,7 @@ router.post(
         message: `Accepted into "${family.familyName}"`,
         relatedId: familyId,
       });
+
       res.status(200).json({ message: "User added", family });
     } catch (error) {
       res.status(500).json({ message: "Server error accepting request" });
@@ -726,8 +803,14 @@ router.post(
     try {
       const { familyId, userId } = req.params;
       const family = await Family.findById(familyId);
-      if (!family || family.owner.toString() !== req.user._id.toString())
+
+      if (!family) return res.status(404).json({ message: "Family not found" });
+
+      ensureOwnerArray(family);
+
+      if (!isUserOwner(family, req.user._id)) {
         return res.status(403).json({ message: "Unauthorized" });
+      }
 
       family.joinRequests = family.joinRequests.filter(
         (id) => id.toString() !== userId
@@ -740,6 +823,7 @@ router.post(
         message: `Join request for "${family.familyName}" declined`,
         relatedId: familyId,
       });
+
       res.status(200).json({ message: "Request declined" });
     } catch (error) {
       res.status(500).json({ message: "Server error declining request" });
@@ -762,17 +846,22 @@ router.put("/:familyId/members", protect, checkStatus, async (req, res) => {
       return res.status(404).json({ message: "Family not found" });
     }
 
-    if (family.owner.toString() !== req.user._id.toString()) {
+    ensureOwnerArray(family);
+
+    if (!isUserOwner(family, req.user._id)) {
       return res.status(403).json({ message: "Unauthorized" });
     }
 
+    // Keep all current owners in the members list
     const uniqueUserIds = new Set(userIds.map((id) => id.toString()));
-    uniqueUserIds.add(family.owner.toString());
+    family.owner.forEach((o) => {
+      const id = o._id ? o._id.toString() : o.toString();
+      uniqueUserIds.add(id);
+    });
 
     const finalUserIds = Array.from(uniqueUserIds);
 
     const users = await User.find({ _id: { $in: finalUserIds } }).select("_id");
-
     if (users.length !== finalUserIds.length) {
       return res.status(400).json({ message: "One or more users not found" });
     }
@@ -821,19 +910,21 @@ router.post(
 
       if (!family) return res.status(404).json({ message: "Family not found" });
 
-      // Only owner can suspend
-      if (family.owner.toString() !== req.user._id.toString())
+      ensureOwnerArray(family);
+
+      if (!isUserOwner(family, req.user._id)) {
         return res.status(403).json({ message: "Unauthorized" });
+      }
 
-      // Cannot suspend owner
-      if (family.owner.toString() === userId)
-        return res.status(400).json({ message: "Cannot suspend owner" });
+      // Cannot suspend an owner
+      if (isUserOwner(family, userId)) {
+        return res.status(400).json({ message: "Cannot suspend an owner" });
+      }
 
-      // Check if user is a member
-      if (!family.members.includes(userId))
+      if (!family.members.includes(userId)) {
         return res.status(400).json({ message: "User is not a member" });
+      }
 
-      // Add to suspendedMembers if not already
       family.suspendedMembers = family.suspendedMembers || [];
       if (!family.suspendedMembers.includes(userId)) {
         family.suspendedMembers.push(userId);
@@ -871,11 +962,12 @@ router.post(
 
       if (!family) return res.status(404).json({ message: "Family not found" });
 
-      // Only owner can unsuspend
-      if (family.owner.toString() !== req.user._id.toString())
-        return res.status(403).json({ message: "Unauthorized" });
+      ensureOwnerArray(family);
 
-      // Remove from suspendedMembers if exists
+      if (!isUserOwner(family, req.user._id)) {
+        return res.status(403).json({ message: "Unauthorized" });
+      }
+
       family.suspendedMembers = family.suspendedMembers || [];
       if (family.suspendedMembers.includes(userId)) {
         family.suspendedMembers = family.suspendedMembers.filter(
@@ -903,4 +995,296 @@ router.post(
   }
 );
 
+// 17. EDIT FAMILY NAME (OWNER ONLY)
+router.put("/:id/name", protect, checkStatus, async (req, res) => {
+  try {
+    const { familyName } = req.body;
+
+    if (!familyName || !familyName.trim()) {
+      return res.status(400).json({ message: "Family name is required" });
+    }
+
+    const family = await Family.findById(req.params.id);
+    if (!family) {
+      return res.status(404).json({ message: "Family not found" });
+    }
+
+    ensureOwnerArray(family);
+
+    if (!isUserOwner(family, req.user._id)) {
+      return res
+        .status(403)
+        .json({ message: "Only a family owner can edit the family name" });
+    }
+
+    family.familyName = familyName.trim();
+    await family.save();
+
+    const populatedFamily = await Family.findById(family._id)
+      .populate("owner", "firstName lastName email profilePicture")
+      .populate("members", "firstName lastName email profilePicture");
+
+    await createFamilyNotifications(family._id, req.user._id, {
+      type: "FAMILY_NAME_UPDATED",
+      title: "Family Name Updated",
+      message: `The family name was changed to "${family.familyName}"`,
+      relatedId: family._id,
+    });
+
+    res.status(200).json({
+      message: "Family name updated successfully",
+      family: populatedFamily,
+    });
+  } catch (error) {
+    console.error("Edit family name error:", error);
+    res.status(500).json({ message: "Server error updating family name" });
+  }
+});
+
+// 18. EXIT / LEAVE FAMILY
+router.post("/:familyId/leave", protect, checkStatus, async (req, res) => {
+  try {
+    const { familyId } = req.params;
+    const userId = req.user._id.toString();
+
+    const family = await Family.findById(familyId);
+    if (!family) {
+      return res.status(404).json({ message: "Family not found" });
+    }
+
+    ensureOwnerArray(family);
+
+    const isMember = family.members.some((id) => id.toString() === userId);
+    if (!isMember) {
+      return res
+        .status(400)
+        .json({ message: "You are not a member of this family" });
+    }
+
+    const isOnlyMember = family.members.length === 1;
+
+    // CASE 1: User is the ONLY member → DELETE family
+    if (isOnlyMember) {
+      await family.deleteOne();
+      return res.status(200).json({
+        message: "You were the only member. Family has been deleted.",
+        deleted: true,
+      });
+    }
+
+    // Remove user from members
+    family.members = family.members.filter((id) => id.toString() !== userId);
+
+    // Remove user from owners (if they were an owner)
+    if (Array.isArray(family.owners)) {
+      family.owners = family.owners.filter((id) => id.toString() !== userId);
+    } else if (family.owner && family.owner.toString() === userId) {
+      family.owner = null; // Fallback if owner is stored as a single reference
+    }
+
+    // Clean up other arrays
+    family.pendingInvites = (family.pendingInvites || []).filter(
+      (id) => id.toString() !== userId
+    );
+    family.joinRequests = (family.joinRequests || []).filter(
+      (id) => id.toString() !== userId
+    );
+    family.suspendedMembers = (family.suspendedMembers || []).filter(
+      (id) => id.toString() !== userId
+    );
+
+    await family.save();
+
+    await createFamilyNotifications(familyId, userId, {
+      type: "MEMBER_LEFT",
+      title: "Member Left",
+      message: `${req.user.firstName} left "${family.familyName}"`,
+      relatedId: familyId,
+    });
+
+    res.status(200).json({
+      message: "You have successfully left the family",
+      deleted: false,
+    });
+  } catch (error) {
+    console.error("Leave family error:", error);
+    res.status(500).json({ message: "Server error leaving family" });
+  }
+});
+
+router.post(
+  "/:familyId/transfer-ownership",
+  protect,
+  checkStatus,
+  async (req, res) => {
+    try {
+      const { familyId } = req.params;
+      const { newOwnerId } = req.body;
+      const userId = req.user._id.toString();
+
+      if (!newOwnerId) {
+        return res.status(400).json({ message: "New owner ID is required" });
+      }
+
+      const family = await Family.findById(familyId);
+      if (!family) {
+        return res.status(404).json({ message: "Family not found" });
+      }
+
+      // ---- Force convert old single owner → array ----
+      let currentOwners = [];
+      if (Array.isArray(family.owner)) {
+        currentOwners = family.owner.map((o) => (o._id ? o._id : o));
+      } else if (family.owner) {
+        currentOwners = [family.owner];
+      }
+
+      // Requester must be an owner
+      const isCurrentOwner = currentOwners.some(
+        (id) => id.toString() === userId
+      );
+      if (!isCurrentOwner) {
+        return res.status(403).json({
+          message: "Only a family owner can transfer or assign ownership",
+        });
+      }
+
+      // New owner must be a member
+      const isMember = family.members.some(
+        (id) => id.toString() === newOwnerId.toString()
+      );
+      if (!isMember) {
+        return res.status(400).json({
+          message: "The selected user is not a member of this family",
+        });
+      }
+
+      // Add if not already an owner
+      const alreadyOwner = currentOwners.some(
+        (id) => id.toString() === newOwnerId.toString()
+      );
+      if (!alreadyOwner) {
+        currentOwners.push(newOwnerId);
+      }
+
+      // ---- Force $set so Mongo accepts the type change ----
+      const updatedFamily = await Family.findByIdAndUpdate(
+        familyId,
+        { $set: { owner: currentOwners } },
+        { new: true }
+      ).populate("owner", "firstName lastName email profilePicture");
+
+      res.status(200).json({
+        message: "Ownership granted/transferred successfully",
+        owners: updatedFamily.owner,
+      });
+    } catch (error) {
+      console.error("Transfer ownership error:", error);
+      res.status(500).json({ message: "Server error transferring ownership" });
+    }
+  }
+);
+
+
+router.post("/:familyId/remove-user", protect, checkStatus, async (req, res) => {
+  try {
+    const { familyId } = req.params;
+    const { userId: targetUserId } = req.body;
+    const requesterId = req.user._id.toString();
+
+    if (!targetUserId) {
+      return res.status(400).json({ message: "userId is required" });
+    }
+
+    const family = await Family.findById(familyId);
+    if (!family) {
+      return res.status(404).json({ message: "Family not found" });
+    }
+
+    // ✅ Normalize owners
+    const currentOwners = (Array.isArray(family.owner) ? family.owner : [family.owner])
+      .filter(Boolean)
+      .map((o) => o.toString());
+
+    const isRequesterOwner = currentOwners.includes(requesterId);
+    if (!isRequesterOwner) {
+      return res.status(403).json({
+        message: "Only owners can remove users",
+      });
+    }
+
+    const targetId = targetUserId.toString();
+    const isTargetOwner = currentOwners.includes(targetId);
+
+    // ❌ Prevent self-removal via this route
+    if (requesterId === targetId) {
+      return res.status(400).json({
+        message: "Use leave family instead",
+      });
+    }
+
+    // ❌ Prevent removing last owner
+    if (isTargetOwner && currentOwners.length === 1) {
+      return res.status(400).json({
+        message: "Cannot remove the last owner",
+      });
+    }
+
+    // ✅ Remove from members
+    const isMember = family.members.some(
+      (id) => id.toString() === targetId
+    );
+
+    if (!isMember && !isTargetOwner) {
+      return res.status(400).json({
+        message: "User is not part of this family",
+      });
+    }
+
+    // ✅ Remove everywhere
+    family.members = family.members.filter(
+      (id) => id.toString() !== targetId
+    );
+
+    family.owner = currentOwners.filter((id) => id !== targetId);
+
+    family.pendingInvites = (family.pendingInvites || []).filter(
+      (id) => id.toString() !== targetId
+    );
+
+    family.joinRequests = (family.joinRequests || []).filter(
+      (id) => id.toString() !== targetId
+    );
+
+    family.suspendedMembers = (family.suspendedMembers || []).filter(
+      (id) => id.toString() !== targetId
+    );
+
+    await family.save();
+
+    const updatedFamily = await Family.findById(familyId)
+      .populate("owner", "firstName lastName email profilePicture")
+      .populate("members", "firstName lastName email profilePicture");
+
+    await createFamilyNotifications(familyId, req.user._id, {
+      type: "USER_REMOVED",
+      title: "User Removed",
+      message: `A user was removed from "${family.familyName}"`,
+      relatedId: familyId,
+      receiver: targetId,
+    });
+
+    res.status(200).json({
+      message: isTargetOwner
+        ? "Owner removed successfully"
+        : "Member removed successfully",
+      family: updatedFamily,
+      owners: updatedFamily.owner,
+    });
+
+  } catch (error) {
+    console.error("Remove user error:", error);
+    res.status(500).json({ message: "Server error removing user" });
+  }
+});
 module.exports = router;

@@ -41,9 +41,20 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-
+    deviceID: {
+      type: String,
+      required: false,
+    },
+    platform: {
+      type: String,
+      enum: ["ios", "android", "others"],
+    },
     /* 🛡️ ACCOUNT STATUS & SECURITY */
     isVerified: {
+      type: Boolean,
+      default: false,
+    },
+    isOncall: {
       type: Boolean,
       default: false,
     },
@@ -60,6 +71,11 @@ const userSchema = new mongoose.Schema(
 
     /* 📲 REAL-TIME & NOTIFICATIONS */
     expoPushToken: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    voipPushToken: {
       type: String,
       default: null,
       index: true,

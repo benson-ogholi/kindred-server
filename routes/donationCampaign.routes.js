@@ -1,37 +1,51 @@
 const express = require("express");
 const router = express.Router();
 const DonationCampaign = require("../models/DonationCampaign");
-const Contribution = require("../models/Contribution"); // The new model we discussed
+const Contribution = require("../models/Contribution");
 const Family = require("../models/Family");
 const { protect } = require("../middlewares/authMiddleware");
 const { createFamilyNotifications } = require("../utils/notificationHelper");
 const multer = require("multer");
 const { uploadToBackblaze } = require("../utils/uploadToBackblaze");
+
 // Use memoryStorage so the file buffer is passed to Backblaze correctly
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB Limit
 });
+
 /**
- * 🔐 Helpers
+ * 🔐 Helpers – owner is now an array
  */
+const isUserOwner = (family, userId) => {
+  const owners = Array.isArray(family.owner)
+    ? family.owner
+    : family.owner
+    ? [family.owner]
+    : [];
+  return owners.some((o) => {
+    const id = o._id ? o._id.toString() : o.toString();
+    return id === userId.toString();
+  });
+};
+
 const hasFamilyAccess = (family, userId) => {
   return (
-    family.owner.toString() === userId ||
-    family.members.some((m) => m.toString() === userId)
+    isUserOwner(family, userId) ||
+    family.members.some((m) => m.toString() === userId.toString())
   );
 };
 
 const canManageCampaign = (campaign, family, userId) => {
   return (
-    campaign.createdBy.toString() === userId ||
-    family.owner.toString() === userId
+    campaign.createdBy.toString() === userId.toString() ||
+    isUserOwner(family, userId)
   );
 };
 
 // ---------------------------------------------------------
-// 1️⃣ CREATE DONATION CAMPAIGN (Updated with Account Details)
+// 1️⃣ CREATE DONATION CAMPAIGN
 // ---------------------------------------------------------
 router.post("/families/:familyId/donations", protect, async (req, res) => {
   try {
@@ -42,7 +56,7 @@ router.post("/families/:familyId/donations", protect, async (req, res) => {
       targetAmount,
       minimumDonation,
       deadline,
-      accountDetails, // Expected: { accountNumber, bankName, accountName, otherDetails }
+      accountDetails,
       visibility,
     } = req.body;
 
@@ -57,7 +71,7 @@ router.post("/families/:familyId/donations", protect, async (req, res) => {
       family: familyId,
       createdBy: req.user._id,
       title,
-      purpose, // UI uses "Purpose"
+      purpose,
       targetAmount: Number(targetAmount),
       minimumDonation: Number(minimumDonation) || 1,
       deadline,
@@ -91,26 +105,20 @@ router.get("/families/:familyId/donations", protect, async (req, res) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    // ===============================
     // 1️⃣ Fetch campaigns
-    // ===============================
     const campaigns = await DonationCampaign.find({
       family: familyId,
     })
       .populate("createdBy", "firstName lastName")
       .sort({ createdAt: -1 });
 
-    // ===============================
     // 2️⃣ Mark ALL campaigns as read
-    // ===============================
     await DonationCampaign.updateMany(
       { family: familyId },
-      { $addToSet: { isRead: userId } } // prevents duplicates
+      { $addToSet: { isRead: userId } }
     );
 
-    // ===============================
     // 3️⃣ Mark ALL contributions (for this family) as read
-    // ===============================
     const familyCampaignIds = campaigns.map((c) => c._id);
 
     await Contribution.updateMany(
@@ -124,9 +132,9 @@ router.get("/families/:familyId/donations", protect, async (req, res) => {
     res.status(500).json({ message: "Error fetching campaigns" });
   }
 });
+
 // ---------------------------------------------------------
 // 3️⃣ CONTRIBUTE TO A CAMPAIGN (Submit Proof)
-// POST /donations/:campaignId/contribute
 // ---------------------------------------------------------
 router.post(
   "/donations/:campaignId/contribute",
@@ -137,35 +145,29 @@ router.post(
       const { campaignId } = req.params;
       const { amountSent, displayPreference } = req.body;
 
-      // 1. Find and validate the campaign
       const campaign = await DonationCampaign.findById(campaignId);
       if (!campaign) {
         return res.status(404).json({ message: "Campaign not found" });
       }
 
-      // 2. Check minimum donation constraint
       if (Number(amountSent) < campaign.minimumDonation) {
         return res.status(400).json({
           message: `Minimum contribution is $${campaign.minimumDonation}`,
         });
       }
 
-      // 3. Ensure a file was actually uploaded
       if (!req.file) {
         return res
           .status(400)
           .json({ message: "Payment proof (screenshot/receipt) is required" });
       }
 
-      // 4. Upload to Backblaze B2 🚀
-      // Passing req.file.buffer and the original name to your utility
       const proofUrl = await uploadToBackblaze(
         req.file.buffer,
         req.file.originalname,
         "payment-proofs"
       );
 
-      // 5. Save the Contribution record
       const contribution = await Contribution.create({
         campaign: campaignId,
         contributor: req.user._id,
@@ -177,7 +179,6 @@ router.post(
         displayPreference: displayPreference || "NAMED",
       });
 
-      // 6. 🔔 Create family notifications
       await createFamilyNotifications(campaign.family, req.user._id, {
         type: "CONTRIBUTION_SUBMITTED",
         title: "Payment Received",
@@ -204,7 +205,14 @@ router.post(
 router.put("/donations/:campaignId", protect, async (req, res) => {
   try {
     const campaign = await DonationCampaign.findById(req.params.campaignId);
+    if (!campaign) {
+      return res.status(404).json({ message: "Campaign not found" });
+    }
+
     const family = await Family.findById(campaign.family);
+    if (!family) {
+      return res.status(404).json({ message: "Family not found" });
+    }
 
     if (!canManageCampaign(campaign, family, req.user._id.toString())) {
       return res.status(403).json({ message: "Unauthorized" });
@@ -221,25 +229,21 @@ router.put("/donations/:campaignId", protect, async (req, res) => {
 
 // ---------------------------------------------------------
 // 5️⃣ DELETE DONATION CAMPAIGN
-// DELETE /donations/:campaignId
 // ---------------------------------------------------------
 router.delete("/donations/:campaignId", protect, async (req, res) => {
   try {
     const { campaignId } = req.params;
 
-    // 1. Find the campaign
     const campaign = await DonationCampaign.findById(campaignId);
     if (!campaign) {
       return res.status(404).json({ message: "Donation campaign not found" });
     }
 
-    // 2. Find the family to check permissions
     const family = await Family.findById(campaign.family);
     if (!family) {
       return res.status(404).json({ message: "Associated family not found" });
     }
 
-    // 3. Permission Check (Creator or Family Owner only)
     if (!canManageCampaign(campaign, family, req.user._id.toString())) {
       return res.status(403).json({
         message:
@@ -250,13 +254,13 @@ router.delete("/donations/:campaignId", protect, async (req, res) => {
     const campaignTitle = campaign.title;
     const familyId = family._id;
 
-    // 4. Cleanup: Delete all contributions linked to this campaign
+    // Cleanup: Delete all contributions linked to this campaign
     await Contribution.deleteMany({ campaign: campaignId });
 
-    // 5. Delete the campaign itself
+    // Delete the campaign itself
     await campaign.deleteOne();
 
-    // 6. 🔔 NOTIFY FAMILY OF DELETION
+    // Notify family
     await createFamilyNotifications(familyId, req.user._id, {
       type: "DONATION_DELETED",
       title: "Campaign Removed",
@@ -277,7 +281,6 @@ router.delete("/donations/:campaignId", protect, async (req, res) => {
 
 // ---------------------------------------------------------
 // 6️⃣ GET ALL CONTRIBUTIONS FOR A FAMILY (Admin View)
-// GET /donations/families/:familyId/admin/contributions
 // ---------------------------------------------------------
 router.get(
   "/families/:familyId/admin/contributions",
@@ -291,7 +294,6 @@ router.get(
         return res.status(403).json({ message: "Access denied" });
       }
 
-      // Find all campaigns in this family, then get all contributions for them
       const campaigns = await DonationCampaign.find({
         family: familyId,
       }).select("_id");
@@ -313,7 +315,6 @@ router.get(
 
 // ---------------------------------------------------------
 // 7️⃣ VERIFY OR REJECT CONTRIBUTION (Admin Only)
-// PATCH /donations/contributions/:contributionId/verify
 // ---------------------------------------------------------
 router.patch(
   "/contributions/:contributionId/verify",
@@ -330,6 +331,9 @@ router.patch(
         return res.status(404).json({ message: "Contribution not found" });
 
       const family = await Family.findById(contribution.campaign.family);
+      if (!family) {
+        return res.status(404).json({ message: "Family not found" });
+      }
 
       // Permission: Only Campaign Creator or Family Owner
       if (
@@ -356,9 +360,8 @@ router.patch(
       }
 
       await contribution.save();
-      // Note: The 'post save' hook in your model will handle incrementing totalRaised if VERIFIED
 
-      // 🔔 Notify the contributor
+      // Notify the contributor
       await createFamilyNotifications(family._id, req.user._id, {
         type: status === "VERIFIED" ? "PAYMENT_APPROVED" : "PAYMENT_REJECTED",
         title: status === "VERIFIED" ? "Payment Verified" : "Payment Declined",
@@ -369,15 +372,13 @@ router.patch(
               }" was approved.`
             : `Your payment for "${contribution.campaign.title}" was declined: ${rejectionReason}`,
         relatedId: contribution.campaign._id,
-        recipientId: contribution.contributor, // Assuming helper supports direct user notification
+        recipientId: contribution.contributor,
       });
 
-      res
-        .status(200)
-        .json({
-          message: `Contribution ${status.toLowerCase()} successfully`,
-          contribution,
-        });
+      res.status(200).json({
+        message: `Contribution ${status.toLowerCase()} successfully`,
+        contribution,
+      });
     } catch (error) {
       res.status(500).json({ message: "Error updating verification status" });
     }
@@ -386,7 +387,6 @@ router.patch(
 
 // ---------------------------------------------------------
 // 8️⃣ GET MY CONTRIBUTIONS (User View)
-// GET /donations/my-contributions
 // ---------------------------------------------------------
 router.get("/my-contributions", protect, async (req, res) => {
   try {
