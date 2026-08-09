@@ -1621,10 +1621,12 @@ io.on("connection", (socket) => {
     const hrs = Math.floor(totalSeconds / 3600);
     const mins = Math.floor((totalSeconds % 3600) / 60);
     const secs = totalSeconds % 60;
+
     const parts = [];
     if (hrs > 0) parts.push(`${hrs}h`);
     if (mins > 0 || hrs > 0) parts.push(`${mins}m`);
     parts.push(`${secs}s`);
+
     return parts.join(" ");
   };
 
@@ -1640,12 +1642,14 @@ io.on("connection", (socket) => {
       const messageUuid = `call-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 9)}`;
+
       let text = "";
       if (status === "missed") {
         text = "Missed voice call";
       } else if (status === "rejected") {
         text = "Call declined";
       } else {
+        // status === "ended"
         text =
           duration > 0
             ? `Call ended • ${formatCallDuration(duration)}`
@@ -1663,6 +1667,7 @@ io.on("connection", (socket) => {
         timestamp: new Date(),
         isRead: false,
       });
+
       await newMessage.save();
 
       io.to(roomUuid).emit("receive_message", {
@@ -1690,27 +1695,16 @@ io.on("connection", (socket) => {
       console.error("[CALL-MSG:ERROR]", err);
     }
   };
-
   const finalizeCall = async (roomId) => {
     const callInfo = activeCalls.get(roomId);
     if (!callInfo) return;
 
-    // Clear any active missed call timeout immediately
-    if (callInfo.missedCallTimeout) {
-      clearTimeout(callInfo.missedCallTimeout);
-      callInfo.missedCallTimeout = null;
-    }
-
-    // Double-ensure that if answerTime is recorded, answered is treated as true
-    const isAnswered = callInfo.answered || Boolean(callInfo.answerTime);
-
-    const duration = isAnswered
+    const duration = callInfo.answered
       ? Math.floor(
           (Date.now() - (callInfo.answerTime || callInfo.startTime)) / 1000
         )
       : 0;
-
-    const status = isAnswered ? "ended" : "missed";
+    const status = callInfo.answered ? "ended" : "missed";
 
     await createCallMessage({
       roomUuid: roomId,
@@ -1736,12 +1730,14 @@ io.on("connection", (socket) => {
     }
   };
 
-  // 1. Register User
+  // Single register_user — handles BOTH the in-memory map (used for
+  // live incoming-call routing) and the persisted online/socketId status.
   socket.on("register_user", async ({ userId }) => {
     if (!userId) return;
     const cleanUserId = userId.toString();
     onlineUsers.set(cleanUserId, socket.id);
     socket.userId = cleanUserId;
+
     try {
       const user = await User.findById(cleanUserId);
       if (user) {
@@ -1754,43 +1750,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 2. Delete Message
-  socket.on(
-    "delete_message",
-    async ({ uuid, messageUuid, userId, forEveryone }) => {
-      try {
-        const msg = await Message.findOne({ messageUuid });
-        if (!msg) return;
-
-        if (forEveryone && msg.senderId === userId) {
-          await Message.deleteOne({ messageUuid });
-          io.to(uuid).emit("message_deleted", { uuid: messageUuid });
-        } else {
-          socket.emit("message_deleted", { uuid: messageUuid });
-        }
-      } catch (err) {
-        console.error("❌ [delete_message] Delete failed:", err);
-      }
-    }
-  );
-
-  // 3. Typing Indicators
-  socket.on("typing", (data) => {
-    socket.to(data.uuid).emit("user_typing", {
-      roomUuid: data.uuid,
-      name: data.fullName,
-      isTyping: true,
-    });
-  });
-
-  socket.on("stop_typing", (data) => {
-    socket.to(data.uuid).emit("user_typing", {
-      roomUuid: data.uuid,
-      isTyping: false,
-    });
-  });
-
-  // 4. Call Room Join & Profile Picture Fetching (Cleanly separated without ID/Name mixing)
+  // 4. Call Room Join & Profile Picture Fetching for Both Connecting Users
   socket.on("kookohor-join-room", async (data) => {
     const roomId = typeof data === "object" ? data.roomId : data;
     const callerId = data?.callerId ? data.callerId.toString() : undefined;
@@ -1813,7 +1773,7 @@ io.on("connection", (socket) => {
         );
       }
 
-      // Fetch both caller and receiver details concurrently
+      // Fetch both caller and receiver details concurrently to get profile pictures and names
       const [callerUser, receiverUser] = await Promise.all([
         callerId
           ? User.findById(callerId).select(
@@ -1851,17 +1811,17 @@ io.on("connection", (socket) => {
         });
       }
 
-      // Ring target receiver directly with correct, non-mixed profile mapping
+      // Ring target receiver directly with both profiles populated
       if (receiverId) {
         const targetSocketId = onlineUsers.get(receiverId.toString());
         const callPayload = {
           roomId,
           callerId,
           receiverId,
-          callerName,
-          callerProfilePicture: callerUser?.profilePicture || "",
-          receiverName,
-          receiverProfilePicture: receiverUser?.profilePicture || "",
+          receiverName: callerName,
+          receiverProfilePicture: callerUser?.profilePicture || "",
+          callerName: receiverName,
+          callerProfilePicture: receiverUser?.profilePicture || "",
           isCaller: false,
         };
 
@@ -1875,7 +1835,7 @@ io.on("connection", (socket) => {
         }
       }
 
-      // Emit to room with precise caller and receiver attributes
+      // Emit to room with both users' profile pictures and names for WebRTC peers
       socket.to(roomId).emit("kookohor-user-connected", {
         socketId: socket.id,
         callerId,
@@ -1889,37 +1849,6 @@ io.on("connection", (socket) => {
       console.error("❌ [kookohor-join-room] error:", err);
     }
   });
-// Helper: resolve which active call a socket belongs to, with fallbacks.
-// Tries (in order): explicit roomId, socket.roomId, then a reverse search
-// through activeCalls matching this socket's known callerId/receiverId.
-const resolveActiveRoomId = (socket, explicitRoomId, callerId, receiverId) => {
-  if (explicitRoomId && activeCalls.has(explicitRoomId)) return explicitRoomId;
-  if (socket.roomId && activeCalls.has(socket.roomId)) return socket.roomId;
-
-  const wantCaller = callerId || socket.callerId;
-  const wantReceiver = receiverId || socket.receiverId;
-
-  if (wantCaller || wantReceiver) {
-    for (const [rid, info] of activeCalls.entries()) {
-      const callerMatch = wantCaller && info.callerId === wantCaller;
-      const receiverMatch = wantReceiver && info.receiverId === wantReceiver;
-      if (callerMatch || receiverMatch) return rid;
-    }
-  }
-  return explicitRoomId || socket.roomId || undefined;
-};
-
-// // Store roomId on the record itself so reverse lookups/finalization stay consistent
-// if (roomId && callerId && !activeCalls.has(roomId)) {
-//   activeCalls.set(roomId, {
-//     answered: false,
-//     startTime: Date.now(),
-//     callerId,
-//     receiverId: receiverId || "room-participant",
-//     callerName,
-//     roomId, // NEW: keep a self-reference for resolveActiveRoomId lookups
-//   });
-// }
 
   // WebRTC Signaling
   socket.on("kookohor-offer", ({ offer, roomId, targetSocketId }) => {
@@ -1930,8 +1859,6 @@ const resolveActiveRoomId = (socket, explicitRoomId, callerId, receiverId) => {
         .emit("kookohor-offer", { offer, senderSocketId: socket.id });
   });
 
-
-  
   socket.on("kookohor-answer", ({ answer, roomId, targetSocketId }) => {
     const target = targetSocketId || roomId || socket.roomId;
     if (target)
@@ -1960,25 +1887,6 @@ const resolveActiveRoomId = (socket, explicitRoomId, callerId, receiverId) => {
         });
     }
   );
-  // Handle switching call to video mode
-  socket.on("kookohor-switch-to-video", ({ roomId }) => {
-    const targetRoom = roomId || socket.roomId;
-    if (targetRoom) {
-      socket
-        .to(targetRoom)
-        .emit("peer-switched-to-video", { senderSocketId: socket.id });
-    }
-  });
-
-  // Handle switching call back to audio mode
-  socket.on("kookohor-switch-to-audio", ({ roomId }) => {
-    const targetRoom = roomId || socket.roomId;
-    if (targetRoom) {
-      socket
-        .to(targetRoom)
-        .emit("peer-switched-to-audio", { senderSocketId: socket.id });
-    }
-  });
 
   socket.on("kookohor-end-call", async (data) => {
     const roomId = data?.roomId || socket.roomId;
@@ -1995,90 +1903,89 @@ const resolveActiveRoomId = (socket, explicitRoomId, callerId, receiverId) => {
     }
   });
 
-  // 5. Get Call History
-// 5. Get Call History
-socket.on("get_calls", async ({ userId }) => {
-  try {
-    const calls = await Message.aggregate([
-      {
-        $match: {
-          messageType: "call",
-          $or: [{ senderId: userId }, { receiverId: userId }],
-        },
-      },
-      { $sort: { timestamp: -1 } },
-      {
-        $addFields: {
-          otherUserId: {
-            $cond: [
-              { $eq: ["$senderId", userId] },
-              "$receiverId",
-              "$senderId",
-            ],
+  // 5. Get Call History with Profile Pictures
+  socket.on("get_calls", async ({ userId }) => {
+    try {
+      const calls = await Message.aggregate([
+        {
+          $match: {
+            messageType: "call",
+            $or: [{ senderId: userId }, { receiverId: userId }],
           },
         },
-      },
-      { $addFields: { otherUserObjectId: { $toObjectId: "$otherUserId" } } },
-      {
-        $lookup: {
-          from: "users",
-          localField: "otherUserObjectId",
-          foreignField: "_id",
-          as: "userDetails",
-        },
-      },
-      { $unwind: { path: "$userDetails", preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          uuid: { $ifNull: ["$messageUuid", "$uuid"] },
-          roomUuid: 1,
-          message: 1,
-          senderId: 1,
-          receiverId: 1,
-          otherUserId: 1,
-          timestamp: { $ifNull: ["$timestamp", "$$NOW"] },
-          messageType: { $literal: "call" },
-          callStatus: { $ifNull: ["$callStatus", "ended"] },
-          duration: { $ifNull: ["$duration", 0] },
-          isCaller: { $eq: ["$senderId", userId] },
-          roomId: "$roomUuid",
-          callerId: { $literal: userId },
-          receiverId: "$otherUserId",
-          receiverName: {
-            $cond: [
-              { $ifNull: ["$userDetails", false] },
-              {
-                $concat: [
-                  "$userDetails.firstName",
-                  " ",
-                  "$userDetails.lastName",
-                ],
-              },
-              "$senderName",
-            ],
-          },
-          receiverProfilePicture: {
-            $ifNull: ["$userDetails.profilePicture", ""],
+        { $sort: { timestamp: -1 } },
+        {
+          $addFields: {
+            otherUserId: {
+              $cond: [
+                { $eq: ["$senderId", userId] },
+                "$receiverId",
+                "$senderId",
+              ],
+            },
           },
         },
-      },
-      { $sort: { timestamp: -1 } },
-    ]);
+        { $addFields: { otherUserObjectId: { $toObjectId: "$otherUserId" } } },
+        {
+          $lookup: {
+            from: "users",
+            localField: "otherUserObjectId",
+            foreignField: "_id",
+            as: "userDetails",
+          },
+        },
+        { $unwind: { path: "$userDetails", preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            uuid: { $ifNull: ["$messageUuid", "$uuid"] },
+            roomUuid: 1,
+            message: 1,
+            senderId: 1,
+            receiverId: 1,
+            otherUserId: 1,
+            timestamp: { $ifNull: ["$timestamp", "$$NOW"] },
+            messageType: { $literal: "call" },
+            callStatus: { $ifNull: ["$callStatus", "ended"] },
+            duration: { $ifNull: ["$duration", 0] },
+            isCaller: { $eq: ["$senderId", userId] },
+            roomId: "$roomUuid",
+            callerId: { $literal: userId },
+            receiverId: "$otherUserId",
+            receiverName: {
+              $cond: [
+                { $ifNull: ["$userDetails", false] },
+                {
+                  $concat: [
+                    "$userDetails.firstName",
+                    " ",
+                    "$userDetails.lastName",
+                  ],
+                },
+                "$senderName",
+              ],
+            },
+            receiverProfilePicture: {
+              $ifNull: ["$userDetails.profilePicture", ""],
+            },
+          },
+        },
+        { $sort: { timestamp: -1 } },
+      ]);
 
-    const mappedCalls = calls.map((call) => ({
-      ...call,
-      timestamp:
-        call.timestamp instanceof Date
-          ? call.timestamp.toISOString()
-          : new Date(call.timestamp).toISOString(),
-      isCaller: "true",
-    }));
+      const mappedCalls = calls.map((call) => ({
+        ...call,
+        timestamp:
+          call.timestamp instanceof Date
+            ? call.timestamp.toISOString()
+            : new Date(call.timestamp).toISOString(),
+        isCaller: "true",
+      }));
 
-    socket.emit("calls_list", mappedCalls);
-  } catch (err) {
-    console.error("❌ [get_calls] Error:", err);
-  }
-});
+      socket.emit("calls_list", mappedCalls);
+    } catch (err) {
+      console.error("❌ [get_calls] Error:", err);
+    }
+  });
 
   socket.on("disconnect", async () => {
     if (socket.userId) {
@@ -2229,29 +2136,21 @@ socket.on("get_calls", async ({ userId }) => {
   });
 
   socket.on("disconnect", async () => {
+    console.log(
+      `[disconnect] Socket ${socket.id} disconnected from room ${socket.roomId}`
+    );
+
+    // Remove from online map
     if (socket.userId) {
       onlineUsers.delete(socket.userId);
-      try {
-        const user = await User.findById(socket.userId);
-        if (user && user.socketId === socket.id) {
-          user.isOnline = false;
-          await user.save();
-        }
-      } catch (err) {
-        console.error("[disconnect] DB update failed:", err);
-      }
     }
-  
-    // FIX: resolve robustly instead of trusting socket.roomId alone
-    const roomId = resolveActiveRoomId(socket, socket.roomId);
+
+    const roomId = socket.roomId;
     if (!roomId) return;
-  
+
+    // Only reset isOncall if the room is now empty
     const room = io.sockets.adapter.rooms.get(roomId);
-    const roomEmpty = !room || room.size === 0;
-  
-    if (activeCalls.has(roomId)) {
-      await finalizeCall(roomId);
-    } else if (roomEmpty) {
+    if (!room || room.size === 0) {
       const userIds = [socket.callerId, socket.receiverId].filter(Boolean);
       if (userIds.length > 0) {
         try {
@@ -2259,13 +2158,17 @@ socket.on("get_calls", async ({ userId }) => {
             { _id: { $in: userIds } },
             { $set: { isOncall: false } }
           );
+          console.log(
+            `[db] Reset isOncall = false on empty room for users: ${userIds.join(
+              ", "
+            )}`
+          );
         } catch (err) {
-          console.error("[disconnect] isOncall reset failed:", err);
+          console.error("[db-error] disconnect isOncall reset failed:", err);
         }
       }
-    }
-  
-    if (!roomEmpty) {
+    } else {
+      // Tell the remaining peer that the other side left
       socket.to(roomId).emit("call-ended", { reason: "peer-disconnected" });
     }
   });
