@@ -151,7 +151,6 @@ userSchema.set("toJSON", {
       ret.savedFamilies = [];
     }
 
-    // 2. Security: Never send password or internal __v to the client
     delete ret.password;
     delete ret.__v;
 
