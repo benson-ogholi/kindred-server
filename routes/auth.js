@@ -21,6 +21,43 @@ const capitalizeName = (name) => {
 const generateOtp = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
 
+
+  // LOGOUT - set isOnline to false
+router.post("/logout", async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ message: "userId is required" });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      {
+        $set: {
+          isOnline: false,
+          socketId: null,
+        },
+      },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    console.log(`🔴 [logout] User ${userId} marked OFFLINE`);
+
+    return res.json({
+      message: "Logged out successfully",
+      isOnline: false,
+    });
+  } catch (error) {
+    console.error("Logout error:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
 // REGISTER - Send OTP to email
 router.post("/register", async (req, res) => {
   try {
