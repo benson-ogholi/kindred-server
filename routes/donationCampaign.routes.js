@@ -178,11 +178,14 @@ router.post(
         },
         displayPreference: displayPreference || "NAMED",
       });
+      const isAnonymous = (displayPreference || "NAMED") === "ANONYMOUS";
 
       await createFamilyNotifications(campaign.family, req.user._id, {
         type: "CONTRIBUTION_SUBMITTED",
         title: "Payment Received",
-        message: `${req.user.firstName} submitted a payment for "${campaign.title}"`,
+        message: isAnonymous
+          ? `An anonymous contribution was submitted for "${campaign.title}"`
+          : `${req.user.firstName} submitted a payment for "${campaign.title}"`,
         relatedId: campaign._id,
       });
 
