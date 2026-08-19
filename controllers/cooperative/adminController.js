@@ -8,9 +8,11 @@ const sendWatalopiaEmail = require("../../utils/cooperative/sendWatalopiaEmail")
 // ==========================================
 // 1. GET ALL USERS (Admin View)
 // ==========================================
+// ==========================================
 exports.getAllUsers = async (req, res) => {
   try {
-    const users = await CooperativeUser.find().select("-password");
+    // Only fetch users who are verified
+    const users = await CooperativeUser.find({ isVerified: true }).select("-password");
 
     return res.status(200).json({
       status: "success",
