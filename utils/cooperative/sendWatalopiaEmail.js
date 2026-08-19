@@ -4,21 +4,26 @@ const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
     user: "kokohorcircle@gmail.com",
-    pass:  "xrik levq mszq eldc",
+    pass: "xrik levq mszq eldc",
   },
 });
 
 // =======================
-// BLUE THEME
+// MODERN FINTECH THEME
 // =======================
 const COLORS = {
-  primary: "#2563EB",
-  light: "#EFF6FF",
-  accent: "#1D4ED8",
-  text: "#334155",
-  muted: "#64748B",
-  bg: "#F8FAFC",
-  white: "#FFFFFF",
+  primary: "#1d4ed8", // Deep royal blue
+  primaryLight: "#dbeafe", // Soft blue tint
+  accent: "#2563eb", // Vibrant blue
+  successBg: "#ecfdf5", // Soft emerald background
+  successText: "#047857", // Emerald text
+  errorBg: "#fef2f2", // Soft red background
+  errorText: "#b91c1c", // Red text
+  textMain: "#0f172a", // Slate 900 (High contrast)
+  textMuted: "#475569", // Slate 600
+  bgWrapper: "#f1f5f9", // Slate 100
+  cardBg: "#ffffff",
+  border: "#e2e8f0",
 };
 
 // =======================
@@ -30,50 +35,165 @@ const baseLayout = (content) => `
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Watalopia</title>
   <style>
-    body { margin: 0; padding: 0; background-color: ${
-      COLORS.bg
-    }; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
-    .wrapper { width: 100%; table-layout: fixed; background-color: ${
-      COLORS.bg
-    }; padding-bottom: 40px; }
-    .main { background-color: ${
-      COLORS.white
-    }; margin: 0 auto; width: 100%; max-width: 600px; border-spacing: 0; border-radius: 16px; overflow: hidden; margin-top: 40px; box-shadow: 0 10px 25px rgba(37, 99, 235, 0.08); }
-    .header { background-color: ${
-      COLORS.primary
-    }; padding: 36px 40px; text-align: center; }
-    .header h1 { margin: 0; font-size: 28px; font-weight: 800; color: #ffffff; letter-spacing: -0.5px; }
-    .body-content { padding: 40px 32px; text-align: center; }
-    .title { font-size: 22px; font-weight: 700; color: ${
-      COLORS.primary
-    }; margin: 0 0 12px 0; }
-    .description { font-size: 16px; line-height: 1.65; color: ${
-      COLORS.muted
-    }; margin: 0 0 28px 0; }
-    .highlight-box { background-color: ${COLORS.light}; border: 2px dashed ${
-  COLORS.primary
-}; border-radius: 12px; padding: 22px 28px; margin: 24px 0; display: inline-block; }
-    .otp-code { font-family: 'Courier New', monospace; font-size: 36px; font-weight: 800; letter-spacing: 10px; color: ${
-      COLORS.accent
-    }; margin: 0; }
-    .info-box { background-color: ${
-      COLORS.light
-    }; border-radius: 12px; padding: 20px 24px; text-align: left; margin: 24px 0; }
-    .info-row { margin-bottom: 10px; font-size: 15px; }
-    .info-label { color: ${
-      COLORS.muted
-    }; display: inline-block; min-width: 120px; }
-    .info-value { color: ${COLORS.text}; font-weight: 600; }
-    .footer { text-align: center; padding: 28px 20px; font-size: 12px; color: #94A3B8; }
+    /* Reset & Client-Specific Defaults */
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: ${COLORS.bgWrapper};
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    table {
+      border-collapse: collapse;
+      mso-table-lspace: 0pt;
+      mso-table-rspace: 0pt;
+    }
+    
+    /* Structural Layout */
+    .wrapper {
+      width: 100%;
+      table-layout: fixed;
+      background-color: ${COLORS.bgWrapper};
+      padding: 40px 0;
+    }
+    .main-container {
+      background-color: ${COLORS.cardBg};
+      margin: 0 auto;
+      width: 100%;
+      max-width: 580px;
+      border-radius: 20px;
+      overflow: hidden;
+      border: 1px solid ${COLORS.border};
+      box-shadow: 0 10px 30px -5px rgba(15, 23, 42, 0.05);
+    }
+    
+    /* Header Styles */
+    .header {
+      background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%);
+      padding: 36px 30px;
+      text-align: center;
+    }
+    .brand-logo {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.15);
+      color: #ffffff;
+      font-weight: 800;
+      font-size: 20px;
+      letter-spacing: -0.5px;
+      padding: 8px 18px;
+      border-radius: 30px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.3px;
+    }
+
+    /* Body Content */
+    .body-content {
+      padding: 40px 36px;
+      text-align: left;
+    }
+    .title {
+      font-size: 22px;
+      font-weight: 700;
+      color: ${COLORS.textMain};
+      margin: 0 0 12px 0;
+      letter-spacing: -0.3px;
+    }
+    .description {
+      font-size: 15px;
+      line-height: 1.6;
+      color: ${COLORS.textMuted};
+      margin: 0 0 24px 0;
+    }
+
+    /* Highlight & OTP Box */
+    .highlight-box {
+      background-color: ${COLORS.primaryLight};
+      border: 1px dashed ${COLORS.primary};
+      border-radius: 14px;
+      padding: 24px;
+      margin: 24px 0;
+      text-align: center;
+    }
+    .otp-code {
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 38px;
+      font-weight: 800;
+      letter-spacing: 12px;
+      color: ${COLORS.primary};
+      margin: 0;
+      text-indent: 12px; /* Centers tracking spacing visually */
+    }
+
+    /* Info Table/Card Grid */
+    .info-box {
+      background-color: #f8fafc;
+      border: 1px solid ${COLORS.border};
+      border-radius: 14px;
+      padding: 20px;
+      margin: 24px 0;
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #edf2f7;
+      font-size: 14px;
+    }
+    .info-row:last-child {
+      border-bottom: none;
+    }
+    .info-label {
+      color: ${COLORS.textMuted};
+    }
+    .info-value {
+      color: ${COLORS.textMain};
+      font-weight: 600;
+    }
+
+    /* Status Badges */
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .badge-success { background-color: ${COLORS.successBg}; color: ${
+  COLORS.successText
+}; }
+    .badge-error { background-color: ${COLORS.errorBg}; color: ${
+  COLORS.errorText
+}; }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      padding: 24px;
+      font-size: 12px;
+      color: #94a3b8;
+      background-color: #f8fafc;
+      border-top: 1px solid ${COLORS.border};
+    }
   </style>
 </head>
 <body>
   <div class="wrapper">
-    <table class="main" cellpadding="0" cellspacing="0">
+    <table class="main-container" cellpadding="0" cellspacing="0" align="center">
       <tr>
         <td class="header">
-          <h1>Watalopia</h1>
+          <div class="brand-logo">Watalopia</div>
+          <h1>Cooperative Savings & Loans</h1>
         </td>
       </tr>
       <tr>
@@ -84,7 +204,7 @@ const baseLayout = (content) => `
       <tr>
         <td class="footer">
           &copy; ${new Date().getFullYear()} Watalopia. All rights reserved.<br>
-          This is an automated message — please do not reply.
+          This is an automated notification—please do not reply directly to this email.
         </td>
       </tr>
     </table>
@@ -100,8 +220,8 @@ const getOtpEmailTemplate = (otp, purpose = "verification") => {
   const isReset = purpose === "reset";
   const title = isReset ? "Reset Your Password" : "Verify Your Account";
   const message = isReset
-    ? "We received a request to reset your password. Use the secure code below to continue."
-    : "Welcome to Watalopia! Please use the code below to complete your registration.";
+    ? "We received a request to reset your password. Use the secure authorization code below to proceed safely."
+    : "Welcome to Watalopia! Please use the verification code below to complete your secure onboarding.";
 
   return baseLayout(`
     <div class="title">${title}</div>
@@ -109,24 +229,25 @@ const getOtpEmailTemplate = (otp, purpose = "verification") => {
     <div class="highlight-box">
       <p class="otp-code">${otp}</p>
     </div>
-    <p style="color:${COLORS.muted}; font-size:14px; margin-top:8px;">
-      This code expires in <strong>10 minutes</strong>.
+    <p style="color:${COLORS.textMuted}; font-size:13px; text-align: center; margin-top: 12px;">
+      This verification code expires in <strong>10 minutes</strong>. Never share this code with anyone.
     </p>
   `);
 };
 
 const getAccountCreatedTemplate = (firstName) => {
   return baseLayout(`
-    <div class="title">Welcome to Watalopia 🎉</div>
+    <div class="title">Welcome aboard, ${firstName || "there"}! 🎉</div>
     <p class="description">
-      Hi ${
-        firstName || "there"
-      }, your account has been created successfully.<br>
-      We’re excited to have you on board.
+      Your account has been successfully created. We are thrilled to welcome you to a smarter way to manage your cooperative savings, build assets, and unlock dividends.
     </p>
-    <p style="color:${COLORS.muted}; font-size:15px;">
-      You can now log in and start exploring cooperative savings, loans, and dividends.
-    </p>
+    <div class="info-box">
+      <p style="margin:0; font-size:14px; color:${
+        COLORS.textMain
+      }; font-weight:500;">
+        ✨ <strong>Next Steps:</strong> Log into your dashboard to complete your profile setup and start exploring automated savings plans.
+      </p>
+    </div>
   `);
 };
 
@@ -136,28 +257,26 @@ const getAdminCreatedAccountTemplate = (
   temporaryPassword
 ) => {
   return baseLayout(`
-    <div class="title">Your Account Has Been Created</div>
+    <div class="title">Your Account Has Been Set Up</div>
     <p class="description">
       Hello ${
         firstName || "there"
-      }, an administrator has created a Watalopia account for you.
+      }, an administrator has provisioned a new Watalopia account for your profile.
     </p>
     <div class="info-box">
-      <div class="info-row">
-        <span class="info-label">Email:</span>
-        <span class="info-value">${email}</span>
-      </div>
+      <div style="margin-bottom: 8px;"><span style="color:${
+        COLORS.textMuted
+      };">Email:</span> <strong style="color:${
+    COLORS.textMain
+  };">${email}</strong></div>
       ${
         temporaryPassword
-          ? `<div class="info-row">
-               <span class="info-label">Temporary Password:</span>
-               <span class="info-value">${temporaryPassword}</span>
-             </div>`
+          ? `<div><span style="color:${COLORS.textMuted};">Temporary Password:</span> <strong style="color:${COLORS.textMain};">${temporaryPassword}</strong></div>`
           : ""
       }
     </div>
-    <p style="color:${COLORS.muted}; font-size:14px;">
-      Please log in and change your password as soon as possible.
+    <p style="color:${COLORS.textMuted}; font-size:13px;">
+      For security reasons, please log in immediately and update your password.
     </p>
   `);
 };
@@ -168,119 +287,127 @@ const getLoginNotificationTemplate = (
   device = "Unknown device"
 ) => {
   return baseLayout(`
-    <div class="title">New Login Detected</div>
+    <div class="title">New Sign-in Alert 🛡️</div>
     <p class="description">
       Hi ${
         firstName || "there"
-      }, we noticed a new login to your Watalopia account.
+      }, we noticed a new sign-in to your Watalopia account.
     </p>
     <div class="info-box">
-      <div class="info-row">
-        <span class="info-label">Time:</span>
-        <span class="info-value">${time || new Date().toLocaleString()}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Device:</span>
-        <span class="info-value">${device}</span>
-      </div>
+      <div style="margin-bottom: 8px;"><span style="color:${
+        COLORS.textMuted
+      };">Time:</span> <strong style="color:${COLORS.textMain};">${
+    time || new Date().toLocaleString()
+  }</strong></div>
+      <div><span style="color:${
+        COLORS.textMuted
+      };">Device / Browser:</span> <strong style="color:${
+    COLORS.textMain
+  };">${device}</strong></div>
     </div>
-    <p style="color:${COLORS.muted}; font-size:14px;">
-      If this wasn’t you, please reset your password immediately.
+    <p style="color:${COLORS.textMuted}; font-size:13px;">
+      If this was you, you can safely ignore this message. If you didn’t authorize this, please secure your account immediately.
     </p>
   `);
 };
 
 const getRequestSubmittedTemplate = (firstName, request) => {
   return baseLayout(`
-    <div class="title">Request Submitted Successfully</div>
+    <div class="title">Request Received Successfully 📝</div>
     <p class="description">
       Hi ${
         firstName || "there"
-      }, we have received your cooperative request and it is now pending review.
+      }, we have successfully received your cooperative request. It is now queued for review by our administrative team.
     </p>
     <div class="info-box">
-      <div class="info-row">
-        <span class="info-label">Title:</span>
-        <span class="info-value">${request.title}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Type:</span>
-        <span class="info-value">${(request.type || "").toUpperCase()}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Transaction:</span>
-        <span class="info-value">${request.transactionType}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Amount:</span>
-        <span class="info-value">₦${Number(
-          request.amount
-        ).toLocaleString()}</span>
-      </div>
+      <div style="margin-bottom: 6px;"><span style="color:${
+        COLORS.textMuted
+      };">Title:</span> <strong style="color:${COLORS.textMain};">${
+    request.title
+  }</strong></div>
+      <div style="margin-bottom: 6px;"><span style="color:${
+        COLORS.textMuted
+      };">Type:</span> <strong style="color:${COLORS.textMain};">${(
+    request.type || ""
+  ).toUpperCase()}</strong></div>
+      <div style="margin-bottom: 6px;"><span style="color:${
+        COLORS.textMuted
+      };">Transaction:</span> <strong style="color:${COLORS.textMain};">${
+    request.transactionType
+  }</strong></div>
+      <div><span style="color:${
+        COLORS.textMuted
+      };">Amount:</span> <strong style="color:${COLORS.textMain};">₦${Number(
+    request.amount
+  ).toLocaleString()}</strong></div>
     </div>
-    <p style="color:${COLORS.muted}; font-size:14px;">
-      You will receive another email once it has been reviewed.
+    <p style="color:${COLORS.textMuted}; font-size:13px;">
+      You will receive a follow-up notification as soon as your request is processed.
     </p>
   `);
 };
 
 const getRequestStatusTemplate = (firstName, request, status) => {
   const isApproved = status === "approved";
-  const title = isApproved ? "Request Approved ✅" : "Request Rejected";
+  const badgeClass = isApproved ? "badge-success" : "badge-error";
+  const title = isApproved ? "Request Approved 🎉" : "Request Update";
   const message = isApproved
-    ? "Great news! Your cooperative request has been approved."
-    : "Unfortunately, your cooperative request was not approved at this time.";
+    ? "Great news! Your cooperative request has been carefully reviewed and officially approved."
+    : "Unfortunately, your cooperative request could not be approved at this time.";
 
   return baseLayout(`
     <div class="title">${title}</div>
     <p class="description">Hi ${firstName || "there"}, ${message}</p>
     <div class="info-box">
-      <div class="info-row">
-        <span class="info-label">Title:</span>
-        <span class="info-value">${request.title}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Type:</span>
-        <span class="info-value">${(request.type || "").toUpperCase()}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Transaction:</span>
-        <span class="info-value">${request.transactionType}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Amount:</span>
-        <span class="info-value">₦${Number(
-          request.amount
-        ).toLocaleString()}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Status:</span>
-        <span class="info-value" style="color:${
-          isApproved ? "#059669" : "#DC2626"
-        }">${status.toUpperCase()}</span>
-      </div>
+      <div style="margin-bottom: 6px;"><span style="color:${
+        COLORS.textMuted
+      };">Title:</span> <strong style="color:${COLORS.textMain};">${
+    request.title
+  }</strong></div>
+      <div style="margin-bottom: 6px;"><span style="color:${
+        COLORS.textMuted
+      };">Type:</span> <strong style="color:${COLORS.textMain};">${(
+    request.type || ""
+  ).toUpperCase()}</strong></div>
+      <div style="margin-bottom: 6px;"><span style="color:${
+        COLORS.textMuted
+      };">Transaction:</span> <strong style="color:${COLORS.textMain};">${
+    request.transactionType
+  }</strong></div>
+      <div style="margin-bottom: 6px;"><span style="color:${
+        COLORS.textMuted
+      };">Amount:</span> <strong style="color:${COLORS.textMain};">₦${Number(
+    request.amount
+  ).toLocaleString()}</strong></div>
+      <div><span style="color:${
+        COLORS.textMuted
+      };">Status:</span> <span class="badge ${badgeClass}">${status}</span></div>
     </div>
   `);
 };
 
 const getDividendDisbursedTemplate = (firstName, amount, title) => {
   return baseLayout(`
-    <div class="title">Dividend Credited 💰</div>
+    <div class="title">Dividend Credited 💸</div>
     <p class="description">
-      Hi ${firstName || "there"}, a dividend has been disbursed to your account.
+      Hi ${
+        firstName || "there"
+      }, earnings have been calculated and your dividend payout has been successfully credited to your account!
     </p>
     <div class="highlight-box">
-      <p style="margin:0; font-size:28px; font-weight:800; color:${
-        COLORS.accent
+      <p style="margin:0; font-size:32px; font-weight:800; color:${
+        COLORS.primary
       };">
         ₦${Number(amount).toLocaleString()}
       </p>
+      <p style="margin:6px 0 0 0; font-size:14px; color:${
+        COLORS.textMuted
+      }; font-weight:500;">
+        ${title || "Dividend Payout"}
+      </p>
     </div>
-    <p style="color:${COLORS.muted}; font-size:15px; margin-top:16px;">
-      ${title || "Dividend payout"}
-    </p>
-    <p style="color:${COLORS.muted}; font-size:14px;">
-      The amount has been credited as a dividend transaction.
+    <p style="color:${COLORS.textMuted}; font-size:13px; text-align: center;">
+      Thank you for being an active contributor to the Watalopia cooperative ecosystem.
     </p>
   `);
 };
@@ -321,7 +448,7 @@ const sendWatalopiaEmail = async (options) => {
     }
   }
 
-  // Explicit template
+  // Explicit template parsing
   if (template) {
     switch (template) {
       case "otp":
@@ -364,14 +491,12 @@ const sendWatalopiaEmail = async (options) => {
       default:
         html =
           providedHtml ||
-          `<div style="font-family:sans-serif;padding:20px;">${
-            providedText || ""
-          }</div>`;
+          `<div style="padding:20px;">${providedText || ""}</div>`;
     }
   }
 
   if (!html) {
-    html = `<div style="font-family:sans-serif;padding:20px;color:#333;">${
+    html = `<div style="padding:20px;color:#0f172a;">${
       providedText || ""
     }</div>`;
   }
