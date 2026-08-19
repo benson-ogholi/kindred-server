@@ -59,6 +59,15 @@ const STATUS_COPY = require("./constants/pr/statusCopy");
 const pru_home = require("./routes/padiman_utility/pru.home.routes");
 const { sendPushNotificationToUser } = require("./utils/notifyUser");
 const { protect, checkStatus } = require("./middlewares/authMiddleware");
+const cooperative_auth = require("./routes/cooperative/authRoutes");
+const cooperative_admin = require("./routes/cooperative/adminRoutes");
+const cooperative_dividends = require("./routes/cooperative/dividendRoutes");
+const cooperative_loans = require("./routes/cooperative/loanRoutes");
+const cooperative_savings = require("./routes/cooperative/savingsRoutes");
+const cooperative_wallet = require("./routes/cooperative/walletRoutes");
+const cooperative_payments = require('./routes/cooperative/cooperativePaymentRouter')
+const cooperative_requests = require('./routes/cooperative/cooperativeRequestRoutes')
+
 
 const app = express();
 const server = http.createServer(app);
@@ -131,6 +140,19 @@ app.use("/api/v1/pru/hire-equipment", pru_hire_equipment);
 app.use("/api/v1/pru/requesting", pru_requesting);
 app.use("/api/v1/pru/payments", pru_payment);
 app.use("/api/v1/pru/wallet", pru_wallet);
+
+/* ==================== COOPERATIVE MODULE ROUTES ==================== */
+app.use("/api/v1/cooperative/auth", cooperative_auth);
+app.use("/api/v1/cooperative/admin", cooperative_admin);
+app.use("/api/v1/dividends", cooperative_dividends);
+app.use("/api/v1/loans", cooperative_loans);
+app.use("/api/v1/savings", cooperative_savings);
+app.use("/api/v1/wallet", cooperative_wallet);
+app.use("/api/v1/cooperative/payment", cooperative_payments);
+app.use("/api/v1/cooperative/requests", cooperative_requests);
+
+
+
 
 app.get("/", (req, res) => {
   res.send("Kindred Auth Server Running 🚀");
