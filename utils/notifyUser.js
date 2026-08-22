@@ -20,12 +20,12 @@ const sendPushNotificationToUser = async (userId, messageData) => {
       return;
     }
 
-    if (!user.exponentPushTokens || user.exponentPushTokens.length === 0) {
+    if (!user.expoPushToken || user.expoPushToken.length === 0) {
       console.log(`User ${userId} has no push tokens`);
       return;
     }
 
-    const messages = user.exponentPushTokens
+    const messages = user.expoPushToken
       .filter(Expo.isExpoPushToken)
       .map((token) => ({
         to: token,

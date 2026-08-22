@@ -21,8 +21,7 @@ const capitalizeName = (name) => {
 const generateOtp = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
 
-
-  // LOGOUT - set isOnline to false
+// LOGOUT - set isOnline to false
 router.post("/logout", async (req, res) => {
   try {
     const { userId } = req.body;
@@ -199,58 +198,40 @@ router.post("/resend-otp", async (req, res) => {
 
 // LOGIN
 // LOGIN - Updated to help frontend redirect unverified users
+// LOGIN - Updated to set expoPushToken conditionally based on notification preferences
 router.post("/login", async (req, res) => {
   console.log("➡️ LOGIN REQUEST RECEIVED");
   console.log("Request body:", req.body);
-
   try {
-    let { email, password } = req.body;
-
+    let { email, password, expoPushToken } = req.body;
     if (!email || !password) {
-      return res.status(400).json({ message: "Email and password are required" });
+      return res
+        .status(400)
+        .json({ message: "Email and password are required" });
     }
-
     email = email.trim().toLowerCase();
-    console.log("Normalized email:", email);
 
     // 1. Find user
     const user = await User.findOne({ email });
-    console.log("User found:", user ? user._id : null);
-
     if (!user) {
-      console.warn("❌ User not found");
       return res.status(400).json({ message: "Invalid credentials" });
     }
 
     // 2. Check password
     const isMatch = await bcrypt.compare(password, user.password);
-    console.log("Password match:", isMatch);
-
     if (!isMatch) {
-      console.warn("❌ Password mismatch");
       return res.status(400).json({ message: "Invalid credentials" });
     }
 
     // 3. Check verification
-    console.log("User verified status:", user.isVerified);
-
     if (!user.isVerified) {
-      console.warn("⚠️ User not verified, generating OTP");
-
       const otp = generateOtp();
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-      console.log("Generated OTP:", otp);
-      console.log("OTP expires at:", expiresAt);
-
       await Otp.findOneAndUpdate(
         { email, purpose: "verify" },
         { otp, expiresAt, purpose: "verify" },
         { upsert: true }
       );
-
-      console.log("OTP saved/updated in DB");
-
       try {
         await sendEmail(
           email,
@@ -258,13 +239,9 @@ router.post("/login", async (req, res) => {
           `Your code is: ${otp}`,
           "verification"
         );
-        console.log("📧 Verification email sent");
       } catch (e) {
         console.error("❌ Email sending failed:", e);
       }
-
-      console.log("Returning 202 - account not verified");
-
       return res.status(202).json({
         message: "Account not verified",
         isVerified: false,
@@ -272,12 +249,23 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    // 4. Successful login
-    console.log("✅ User verified, generating token");
+    // 4. Update expoPushToken conditionally based on preferences
+    const isPushEnabled = user.notificationPreferences?.push?.enabled ?? true;
 
+    if (isPushEnabled && expoPushToken) {
+      user.expoPushToken = expoPushToken;
+      console.log(`📲 [login] Updated expoPushToken for user ${user._id}`);
+    } else if (!isPushEnabled && user.expoPushToken) {
+      user.expoPushToken = null;
+      console.log(
+        `🔕 [login] Push notifications disabled for user ${user._id}, token cleared`
+      );
+    }
+
+    await user.save();
+
+    // 5. Successful login response
     const token = generateToken(user._id);
-    console.log("JWT generated");
-
     const responsePayload = {
       message: "Login successful",
       isVerified: true,
@@ -287,18 +275,17 @@ router.post("/login", async (req, res) => {
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
+        expoPushToken: user.expoPushToken,
+        notificationPreferences: user.notificationPreferences,
       },
     };
-
-    console.log("Login response payload:", responsePayload);
 
     return res.json(responsePayload);
   } catch (error) {
     console.error("🔥 LOGIN ERROR:", error);
-    return res.status(500).json({ 
-      message: "Server error", 
-      error: error.message 
-    });
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
   }
 });
 // FORGOT PASSWORD
