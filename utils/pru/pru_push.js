@@ -3,7 +3,7 @@ const nodemailer = require("nodemailer");
 
 // Models — Safely points to isolated Mongoose model instances
 const PRUNOTIFY = require("../../models/padiman_utility_models/PRUNotify");
-const PRUtility = require("../../models/padiman_utility_models/PRUNotify");
+const PRUtility = require("../../models/padiman_utility_models/PRUtility");
 
 const expo = new Expo();
 
@@ -11,20 +11,22 @@ const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
     user: "kokohorcircle@gmail.com",
-    // 💡 Tip: Move this app password to an environment variable (.env) for production security!
-    pass: "xrik levq mszq eldc",
+    // 💡 Tip: Move this app password to process.env.GMAIL_APP_PASS for production security!
+    pass: process.env.GMAIL_APP_PASS || "xrik levq mszq eldc",
   },
 });
 
 /**
- * Sends a stylized purple & dark themed HTML email notification
+ * Helper: Sends stylized HTML email notification
  */
 const sendEmailNotification = async (user, messageData) => {
   try {
     const { title, body } = messageData;
 
+    if (!user.email) return;
+
     await transporter.sendMail({
-      from: `"Padiman Route" <kokohorcircle@gmail.com>`,
+      from: `"Padiman Utility" <kokohorcircle@gmail.com>`,
       to: user.email,
       subject: title,
       html: `
@@ -40,7 +42,7 @@ const sendEmailNotification = async (user, messageData) => {
             
             <tr>
               <td style="padding: 24px; background: linear-gradient(135deg, #6D28D9, #4C1D95); text-align: center;">
-                <span style="font-size: 20px; font-weight: bold; color: #FFFFFF; letter-spacing: 1px;">PADIMAN ROUTE</span>
+                <span style="font-size: 20px; font-weight: bold; color: #FFFFFF; letter-spacing: 1px;">PADIMAN UTILITY</span>
               </td>
             </tr>
 
@@ -58,7 +60,7 @@ const sendEmailNotification = async (user, messageData) => {
             <tr>
               <td style="padding: 24px 30px; background-color: #0F0D18; border-top: 1px solid #231E36; text-align: center;">
                 <p style="margin: 0; font-size: 12px; color: #6B7280; line-height: 1.5;">
-                  This is an automated notification from Padiman Route.<br>
+                  This is an automated notification from Padiman Utility.<br>
                   Please do not reply directly to this email.
                 </p>
               </td>
@@ -76,80 +78,81 @@ const sendEmailNotification = async (user, messageData) => {
 };
 
 /**
- * Dispatches push notifications to Expo client tokens
+ * Helper: Dispatches push notification to user's expoPushToken string
  */
-const sendPushNotificationToUser = async (userOrId, messageData) => {
+const sendPushNotificationToUser = async (
+  user,
+  messageData,
+  savedNotificationId
+) => {
   try {
     const { title, body, router, type = "GENERAL", data = {} } = messageData;
 
-    // Support receiving either a full User object or just a userId string
-    let user = typeof userOrId === "object" ? userOrId : null;
-    const userId = user ? user._id : userOrId;
-
-    if (!user) {
-      user = await PRUtility.findById(userId);
-      if (!user) {
-        console.log(`User ${userId} not found`);
-        return;
-      }
-    }
-
-    // Save notification trail in DB
-    const savedNotification = await PRUNOTIFY.create({
-      user: userId,
-      title,
-      body,
-      type,
-      data: { ...data, router },
-      sentViaPush: true,
-    });
-
-    if (user.exponentPushTokens?.length > 0) {
-      const messages = user.exponentPushTokens
-        .filter(Expo.isExpoPushToken)
-        .map((token) => ({
-          to: token,
+    if (user.expoPushToken && Expo.isExpoPushToken(user.expoPushToken)) {
+      const messages = [
+        {
+          to: user.expoPushToken,
           sound: "default",
           title,
           body,
           data: {
             router,
-            notificationId: savedNotification._id.toString(),
+            notificationId: savedNotificationId,
             type,
             ...data,
           },
-        }));
+        },
+      ];
 
       const chunks = expo.chunkPushNotifications(messages);
       for (const chunk of chunks) {
         await expo.sendPushNotificationsAsync(chunk);
       }
-      console.log(`✅ Push sent to user ${userId}`);
+      console.log(`✅ Push sent to user ${user._id}`);
+    } else {
+      console.log(
+        `⚠️ User ${user._id} has no valid expoPushToken. Skipping push notification.`
+      );
     }
   } catch (err) {
-    console.error("❌ Push Error logs:", err);
+    console.error("❌ Push Error:", err);
   }
 };
 
 /**
- * Orchestrates sending both Push and Email channels simultaneously
+ * Single Main Function: Saves notification to DB and sends Push & Email
  */
 const sendNotification = async (userId, messageData) => {
   try {
+    const { title, body, router, type = "GENERAL", data = {} } = messageData;
+
     const user = await PRUtility.findById(userId);
     if (!user) {
       console.log(`User ${userId} not found for notification routing.`);
       return;
     }
 
-    // Performance Boost: Pass the pre-fetched user object straight down
-    // to stop push notifications from wasting an extra database query.
+    // 1. Save record to DB
+    const savedNotification = await PRUNOTIFY.create({
+      user: userId,
+      title,
+      body,
+      type,
+      data: { ...data, router },
+      sentViaPush: !!user.expoPushToken,
+    });
+
+    // 2. Fire Push Notification & Email in parallel
     await Promise.allSettled([
-      sendPushNotificationToUser(user, messageData),
+      sendPushNotificationToUser(
+        user,
+        messageData,
+        savedNotification._id.toString()
+      ),
       sendEmailNotification(user, messageData),
     ]);
 
-    console.log(`✅ All notification pipelines processed for user ${userId}`);
+    console.log(`✅ All notification channels executed for user ${userId}`);
   } catch (err) {
     console.error("❌ sendNotification Error:", err.message);
   }
@@ -157,5 +160,4 @@ const sendNotification = async (userId, messageData) => {
 
 module.exports = {
   sendNotification,
-  sendPushNotificationToUser,
 };

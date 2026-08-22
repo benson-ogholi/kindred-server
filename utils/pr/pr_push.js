@@ -11,17 +11,19 @@ const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
     user: "kokohorcircle@gmail.com",
-    // 💡 Tip: Move this app password to an environment variable (.env) for production security!
-    pass: "xrik levq mszq eldc",
+    // 💡 Tip: Move this app password to process.env.GMAIL_APP_PASS for production security!
+    pass: process.env.GMAIL_APP_PASS || "xrik levq mszq eldc",
   },
 });
 
 /**
- * Sends a stylized purple & dark themed HTML email notification
+ * Helper: Sends HTML email notification
  */
 const sendEmailNotification = async (user, messageData) => {
   try {
     const { title, body } = messageData;
+
+    if (!user.email) return;
 
     await transporter.sendMail({
       from: `"Padiman Route" <kokohorcircle@gmail.com>`,
@@ -76,86 +78,88 @@ const sendEmailNotification = async (user, messageData) => {
 };
 
 /**
- * Dispatches push notifications to Expo client tokens
+ * Helper: Dispatches push notification via Expo using user.expoPushToken
  */
-const sendPushNotificationToUser = async (userOrId, messageData) => {
+const sendPushNotificationToUser = async (
+  user,
+  messageData,
+  savedNotificationId
+) => {
   try {
     const { title, body, router, type = "GENERAL", data = {} } = messageData;
 
-    // Support receiving either a full User object or just a userId string
-    let user = typeof userOrId === "object" ? userOrId : null;
-    const userId = user ? user._id : userOrId;
-
-    if (!user) {
-      user = await Padiman_Route_User.findById(userId);
-      if (!user) {
-        console.log(`User ${userId} not found`);
-        return;
-      }
-    }
-
-    // Save notification trail in DB
-    const savedNotification = await PadimanRouteNotification.create({
-      user: userId,
-      title,
-      body,
-      type,
-      data: { ...data, router },
-      sentViaPush: true,
-    });
-
-    if (user.exponentPushTokens?.length > 0) {
-      const messages = user.exponentPushTokens
-        .filter(Expo.isExpoPushToken)
-        .map((token) => ({
-          to: token,
+    if (user.expoPushToken && Expo.isExpoPushToken(user.expoPushToken)) {
+      const messages = [
+        {
+          to: user.expoPushToken,
           sound: "default",
           title,
           body,
           data: {
             router,
-            notificationId: savedNotification._id.toString(),
+            notificationId: savedNotificationId,
             type,
             ...data,
           },
-        }));
+        },
+      ];
 
       const chunks = expo.chunkPushNotifications(messages);
       for (const chunk of chunks) {
         await expo.sendPushNotificationsAsync(chunk);
       }
-      console.log(`✅ Push sent to user ${userId}`);
+      console.log(`✅ Push sent to user ${user._id}`);
+    } else {
+      console.log(
+        `⚠️ User ${user._id} has no valid expoPushToken. Skipping push.`
+      );
     }
   } catch (err) {
-    console.error("❌ Push Error logs:", err);
+    console.error("❌ Push Error:", err);
   }
 };
 
 /**
- * Orchestrates sending both Push and Email channels simultaneously
+ * Primary Notification Dispatcher
+ * Saves to DB and fires Push & Email concurrently.
  */
 const sendNotification = async (userId, messageData) => {
   try {
+    const { title, body, router, type = "GENERAL", data = {} } = messageData;
+
     const user = await Padiman_Route_User.findById(userId);
     if (!user) {
       console.log(`User ${userId} not found for notification routing.`);
       return;
     }
 
-    // Performance Boost: Pass the pre-fetched user object straight down
-    // to stop push notifications from wasting an extra database query.
+    // 1. Save notification record in database
+    const savedNotification = await PadimanRouteNotification.create({
+      user: userId,
+      title,
+      body,
+      type,
+      data: { ...data, router },
+      sentViaPush: !!user.expoPushToken,
+    });
+
+    // 2. Dispatch Push and Email in parallel
     await Promise.allSettled([
-      sendPushNotificationToUser(user, messageData),
+      sendPushNotificationToUser(
+        user,
+        messageData,
+        savedNotification._id.toString()
+      ),
       sendEmailNotification(user, messageData),
     ]);
 
-    console.log(`✅ All notification pipelines processed for user ${userId}`);
+    console.log(`✅ Notification processing complete for user ${userId}`);
   } catch (err) {
     console.error("❌ sendNotification Error:", err.message);
   }
 };
 
+// Only export sendNotification
 module.exports = {
   sendNotification,
-  sendPushNotificationToUser,
 };

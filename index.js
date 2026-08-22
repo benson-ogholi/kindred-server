@@ -1270,16 +1270,16 @@ io.on("connection", (socket) => {
       "📥 [join_room] REQUEST RECEIVED:",
       JSON.stringify(data, null, 2)
     );
-
+  
     const { uuid, userId } = data;
     if (!uuid) {
       console.log("⚠️ [join_room] FAILED: Missing uuid in payload");
       return;
     }
-
+  
     socket.join(uuid);
     console.log(`🏠 [join_room] Socket ${socket.id} joined room: ${uuid}`);
-
+  
     try {
       console.log(
         `⏳ [join_room] Marking unread messages as read for receiverId: ${userId} in room: ${uuid}`
@@ -1292,16 +1292,16 @@ io.on("connection", (socket) => {
         "📖 [join_room] MESSAGES MARKED READ:",
         JSON.stringify(updateResult, null, 2)
       );
-
+  
       console.log(`⏳ [join_room] Fetching message history...`);
       const history = await Message.find({ roomUuid: uuid })
         .sort({ timestamp: 1 })
         .lean();
-
+  
       const mappedHistory = history.map((msg) => {
         const isImage = msg.messageType === "image";
         const isVoice = msg.messageType === "voice";
-
+  
         return {
           uuid: msg.messageUuid || msg.uuid,
           message: msg.message,
@@ -1323,12 +1323,12 @@ io.on("connection", (socket) => {
           isRead: msg.isRead || false,
         };
       });
-
+  
       console.log(
         `📤 [join_room] EMITTING LOAD_MESSAGES (Count: ${mappedHistory.length}) to socket.`
       );
       socket.emit("load_messages", mappedHistory);
-
+  
       const readUpdate = { roomUuid: uuid, readerId: userId };
       io.to(uuid).emit("messages_marked_read", readUpdate);
       console.log(
@@ -1338,7 +1338,7 @@ io.on("connection", (socket) => {
       console.error("❌ [join_room] Error joining room:", err);
     }
   });
-
+  
   socket.on("send_message", async (data) => {
     console.log(
       "📥 [send_message] Received message payload from:",
@@ -1346,7 +1346,7 @@ io.on("connection", (socket) => {
       "to room:",
       data.uuid
     );
-
+  
     const {
       uuid: roomUuid,
       message: textMessage,
@@ -1359,17 +1359,17 @@ io.on("connection", (socket) => {
       duration = 0,
       receiverProfilePicture = "",
     } = data;
-
+  
     if (!roomUuid || !senderId || !receiverId || !messageUuid) {
       console.error(`❌ [send_message] Missing required fields in payload.`);
       return socket.emit("error", { message: "Missing required fields" });
     }
-
+  
     try {
       let imageuri = "",
         videouri = "",
         audioUri = "";
-
+  
       if (base64Media && messageType !== "text") {
         console.log(
           `⏳ [send_message] Processing base64 media upload for type: ${messageType}...`
@@ -1377,21 +1377,21 @@ io.on("connection", (socket) => {
         const parts = base64Media.split(";base64,");
         const base64Data = parts.length > 1 ? parts.pop() : parts[0];
         const fileBuffer = Buffer.from(base64Data, "base64");
-
+  
         const extensionMap = { image: "jpg", video: "mp4", voice: "m4a" };
         const extension = extensionMap[messageType] || "bin";
         const fileName = `${messageType}s/${messageUuid}.${extension}`;
-
+  
         const uploadedUrl = await uploadToBackblaze(
           fileBuffer,
           fileName,
           "chat_attachments"
         );
-
+  
         if (messageType === "image") imageuri = uploadedUrl;
         else if (messageType === "video") videouri = uploadedUrl;
         else if (messageType === "voice") audioUri = uploadedUrl;
-
+  
         console.log(
           "✅ [send_message] MEDIA UPLOADED:",
           JSON.stringify(
@@ -1405,7 +1405,7 @@ io.on("connection", (socket) => {
           )
         );
       }
-
+  
       console.log(`⏳ [send_message] Saving new general chat message to DB...`);
       const newMessage = new Message({
         roomUuid,
@@ -1423,10 +1423,10 @@ io.on("connection", (socket) => {
         timestamp: new Date(),
         isRead: false,
       });
-
+  
       await newMessage.save();
       console.log(`✅ [send_message] Message saved with ID: ${newMessage._id}`);
-
+  
       const messageToSend = {
         uuid: messageUuid,
         message: newMessage.message,
@@ -1439,17 +1439,46 @@ io.on("connection", (socket) => {
         audioUri: newMessage.audioUri,
         duration: newMessage.duration,
       };
-
+  
       console.log(
         "📤 [send_message] OUTGOING MESSAGE PAYLOAD:",
         JSON.stringify(messageToSend, null, 2)
       );
-
+  
       io.to(roomUuid).emit("receive_message", messageToSend);
       console.log(
         `✅ [send_message] Broadcasted 'receive_message' to room: ${roomUuid}`
       );
-
+  
+      // ========== PUSH NOTIFICATION TO RECEIVER ==========
+      try {
+        let notificationBody = newMessage.message;
+  
+        if (messageType === "image") notificationBody = "📷 Sent a photo";
+        else if (messageType === "video") notificationBody = "🎥 Sent a video";
+        else if (messageType === "voice") notificationBody = "🎤 Sent a voice message";
+  
+        await sendPushNotificationToUser(receiverId, {
+          title: senderName || "New Message",
+          body: notificationBody,
+          router: "ChatScreen", // change to your actual screen name if different
+          data: {
+            type: "chat_message",
+            roomUuid,
+            messageUuid,
+            senderId,
+            receiverId,
+            messageType,
+          },
+          sound: "default",
+        });
+  
+        console.log(`🔔 [send_message] Push notification sent to receiver: ${receiverId}`);
+      } catch (notifErr) {
+        console.error("❌ [send_message] Failed to send push notification:", notifErr);
+      }
+      // ===================================================
+  
       console.log(
         `⏳ [send_message] Calculating unread count for receiver: ${receiverId}...`
       );
@@ -1457,7 +1486,7 @@ io.on("connection", (socket) => {
         receiverId,
         isRead: false,
       });
-
+  
       io.to(roomUuid).emit("unread_update", {
         roomUuid,
         unreadCount,
@@ -1477,7 +1506,7 @@ io.on("connection", (socket) => {
       });
     }
   });
-
+  
   socket.on(
     "edit_message",
     async ({ uuid, messageUuid, newMessage, userId }) => {
@@ -1492,7 +1521,7 @@ io.on("connection", (socket) => {
           );
           return socket.emit("error", { message: "Access denied" });
         }
-
+  
         const minutesPassed =
           (Date.now() - new Date(msg.timestamp).getTime()) / 60000;
         if (minutesPassed > 5) {
@@ -1503,10 +1532,10 @@ io.on("connection", (socket) => {
           );
           return socket.emit("error", { message: "Time limit exceeded" });
         }
-
+  
         msg.message = newMessage.trim();
         await msg.save();
-
+  
         io.to(uuid).emit("message_edited", {
           uuid: messageUuid,
           newMessage: msg.message,
@@ -1519,7 +1548,7 @@ io.on("connection", (socket) => {
       }
     }
   );
-
+  
   socket.on("mark_messages_read", async ({ uuid, userId }) => {
     if (!uuid || !userId) return;
     try {
@@ -1540,14 +1569,14 @@ io.on("connection", (socket) => {
       console.error("❌ [mark_messages_read]", err);
     }
   });
-
+  
   socket.on(
     "delete_message",
     async ({ uuid, messageUuid, userId, forEveryone }) => {
       try {
         const msg = await Message.findOne({ messageUuid });
         if (!msg) return;
-
+  
         if (forEveryone && msg.senderId === userId) {
           await Message.deleteOne({ messageUuid });
           io.to(uuid).emit("message_deleted", { uuid: messageUuid });
@@ -1559,7 +1588,7 @@ io.on("connection", (socket) => {
       }
     }
   );
-
+  
   socket.on("typing", (data) => {
     socket.to(data.uuid).emit("user_typing", {
       roomUuid: data.uuid,
@@ -1567,14 +1596,14 @@ io.on("connection", (socket) => {
       isTyping: true,
     });
   });
-
+  
   socket.on("stop_typing", (data) => {
     socket.to(data.uuid).emit("user_typing", {
       roomUuid: data.uuid,
       isTyping: false,
     });
   });
-
+  
   // ---- Calls ----
   socket.on("kookohor-join-room", async (data) => {
     const roomId = typeof data === "object" ? data.roomId : data;
@@ -1582,13 +1611,13 @@ io.on("connection", (socket) => {
     const receiverId = data?.receiverId
       ? data.receiverId.toString()
       : undefined;
-
+  
     if (!roomId) return;
     socket.join(roomId);
     socket.roomId = roomId;
     socket.callerId = callerId;
     socket.receiverId = receiverId;
-
+  
     try {
       const userIds = [callerId, receiverId].filter(Boolean);
       if (userIds.length > 0) {
@@ -1597,7 +1626,7 @@ io.on("connection", (socket) => {
           { $set: { isOncall: true } }
         );
       }
-
+  
       const [callerUser, receiverUser] = await Promise.all([
         callerId
           ? User.findById(callerId).select(
@@ -1610,13 +1639,13 @@ io.on("connection", (socket) => {
             )
           : null,
       ]);
-
+  
       const callerName = callerUser
         ? `${callerUser.firstName || ""} ${callerUser.lastName || ""}`.trim() ||
           callerUser.fullName ||
           "Someone"
         : "Someone";
-
+  
       const receiverName = receiverUser
         ? `${receiverUser.firstName || ""} ${
             receiverUser.lastName || ""
@@ -1624,7 +1653,7 @@ io.on("connection", (socket) => {
           receiverUser.fullName ||
           "Someone"
         : "Someone";
-
+  
       if (roomId && callerId && !activeCalls.has(roomId)) {
         activeCalls.set(roomId, {
           answered: false,
@@ -1634,7 +1663,7 @@ io.on("connection", (socket) => {
           callerName,
         });
       }
-
+  
       if (receiverId) {
         const targetSocketId = onlineUsers.get(receiverId.toString());
         const callPayload = {
@@ -1647,7 +1676,7 @@ io.on("connection", (socket) => {
           receiverProfilePicture: receiverUser?.profilePicture || "",
           isCaller: false,
         };
-
+  
         if (targetSocketId) {
           io.to(targetSocketId).emit("incoming-call", callPayload);
         } else {
@@ -1656,8 +1685,30 @@ io.on("connection", (socket) => {
             io.to(receiverUserDoc.socketId).emit("incoming-call", callPayload);
           }
         }
+  
+        // ========== PUSH NOTIFICATION FOR INCOMING CALL ==========
+        try {
+          await sendPushNotificationToUser(receiverId, {
+            title: "Incoming Call",
+            body: `${callerName} is calling you...`,
+            router: "IncomingCallScreen", // change to your actual screen
+            data: {
+              type: "incoming_call",
+              roomId,
+              callerId,
+              receiverId,
+              callerName,
+              callerProfilePicture: callerUser?.profilePicture || "",
+            },
+            sound: "default",
+          });
+          console.log(`📞 [kookohor-join-room] Call push notification sent to ${receiverId}`);
+        } catch (callNotifErr) {
+          console.error("❌ [kookohor-join-room] Failed to send call push:", callNotifErr);
+        }
+        // ========================================================
       }
-
+  
       socket.to(roomId).emit("kookohor-user-connected", {
         socketId: socket.id,
         callerId,
@@ -1671,7 +1722,7 @@ io.on("connection", (socket) => {
       console.error("❌ [kookohor-join-room] error:", err);
     }
   });
-
+  
   socket.on("kookohor-offer", ({ offer, roomId, targetSocketId }) => {
     const target = targetSocketId || roomId || socket.roomId;
     if (target)
@@ -1679,14 +1730,14 @@ io.on("connection", (socket) => {
         .to(target)
         .emit("kookohor-offer", { offer, senderSocketId: socket.id });
   });
-
+  
   socket.on("kookohor-answer", ({ answer, roomId, targetSocketId }) => {
     const target = targetSocketId || roomId || socket.roomId;
     if (target)
       socket
         .to(target)
         .emit("kookohor-answer", { answer, senderSocketId: socket.id });
-
+  
     const activeRoomId = roomId || socket.roomId;
     if (activeRoomId && activeCalls.has(activeRoomId)) {
       const info = activeCalls.get(activeRoomId);
@@ -1696,7 +1747,7 @@ io.on("connection", (socket) => {
       }
     }
   });
-
+  
   socket.on(
     "kookohor-ice-candidate",
     ({ candidate, roomId, targetSocketId }) => {
@@ -1708,7 +1759,7 @@ io.on("connection", (socket) => {
         });
     }
   );
-
+  
   socket.on("kookohor-switch-to-video", ({ roomId }) => {
     const targetRoom = roomId || socket.roomId;
     if (targetRoom) {
@@ -1717,7 +1768,7 @@ io.on("connection", (socket) => {
         .emit("peer-switched-to-video", { senderSocketId: socket.id });
     }
   });
-
+  
   socket.on("kookohor-switch-to-audio", ({ roomId }) => {
     const targetRoom = roomId || socket.roomId;
     if (targetRoom) {
@@ -1726,13 +1777,13 @@ io.on("connection", (socket) => {
         .emit("peer-switched-to-audio", { senderSocketId: socket.id });
     }
   });
-
+  
   socket.on("kookohor-end-call", async (data) => {
     const roomId = data?.roomId || socket.roomId;
     if (!roomId) return;
     await finalizeCall(roomId);
     io.to(roomId).emit("call-ended", { roomId });
-
+  
     const room = io.sockets.adapter.rooms.get(roomId);
     if (room) {
       for (const sid of room) {
@@ -1741,7 +1792,7 @@ io.on("connection", (socket) => {
       }
     }
   });
-
+  
   // ---- Inbox / Calls list ----
   socket.on("get_calls", async ({ userId }) => {
     try {
@@ -1810,7 +1861,7 @@ io.on("connection", (socket) => {
         },
         { $sort: { timestamp: -1 } },
       ]);
-
+  
       const mappedCalls = calls.map((call) => ({
         ...call,
         timestamp:
@@ -1819,13 +1870,13 @@ io.on("connection", (socket) => {
             : new Date(call.timestamp).toISOString(),
         isCaller: "true",
       }));
-
+  
       socket.emit("calls_list", mappedCalls);
     } catch (err) {
       console.error("❌ [get_calls] Error:", err);
     }
   });
-
+  
   // Get conversations + mark the requester ONLINE
   socket.on("get_conversations", async ({ userId }) => {
     console.log(
@@ -1851,7 +1902,7 @@ io.on("connection", (socket) => {
           );
         }
       }
-
+  
       const conversations = await Message.aggregate([
         { $match: { $or: [{ senderId: userId }, { receiverId: userId }] } },
         { $sort: { timestamp: -1 } },
@@ -1936,12 +1987,12 @@ io.on("connection", (socket) => {
         },
         { $sort: { timestamp: -1 } },
       ]);
-
+  
       console.log(
         "📂 [get_conversations] UPDATED INBOX DATA EXTRACTED SUCCESSFULLY:",
         JSON.stringify(conversations, null, 2)
       );
-
+  
       socket.emit("conversations_list", conversations);
       console.log(
         `✅ [get_conversations] Emitted 'conversations_list' to socket ${socket.id}`
@@ -1953,11 +2004,11 @@ io.on("connection", (socket) => {
       );
     }
   });
-
+  
   // Disconnect → mark OFFLINE
   socket.on("disconnect", async () => {
     console.log(`👋 [disconnect] Socket ${socket.id} disconnected`);
-
+  
     if (socket.userId) {
       onlineUsers.delete(socket.userId);
       try {
@@ -1972,13 +2023,13 @@ io.on("connection", (socket) => {
         console.error("[disconnect] DB update failed:", err);
       }
     }
-
+  
     const roomId = resolveActiveRoomId(socket, socket.roomId);
     if (!roomId) return;
-
+  
     const room = io.sockets.adapter.rooms.get(roomId);
     const roomEmpty = !room || room.size === 0;
-
+  
     if (activeCalls.has(roomId)) {
       await finalizeCall(roomId);
     } else if (roomEmpty) {
@@ -1994,20 +2045,20 @@ io.on("connection", (socket) => {
         }
       }
     }
-
+  
     if (!roomEmpty) {
       socket.to(roomId).emit("call-ended", { reason: "peer-disconnected" });
     }
   });
-});
-
-// --- DATABASE & SERVER START ---
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(() => console.log("🟢 [Server] MongoDB Connected Successfully"))
-  .catch((err) => console.error("🔴 [Server] MongoDB Connection Error:", err));
-
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`🚀 [Server] Kindred Auth Server running on port ${PORT}`);
-});
+  });
+  
+  // --- DATABASE & SERVER START ---
+  mongoose
+    .connect(process.env.MONGODB_URI)
+    .then(() => console.log("🟢 [Server] MongoDB Connected Successfully"))
+    .catch((err) => console.error("🔴 [Server] MongoDB Connection Error:", err));
+  
+  const PORT = process.env.PORT || 5000;
+  server.listen(PORT, () => {
+    console.log(`🚀 [Server] Kindred Auth Server running on port ${PORT}`);
+  });
