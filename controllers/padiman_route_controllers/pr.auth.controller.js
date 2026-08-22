@@ -55,7 +55,7 @@ exports.registerUser = async (req, res) => {
 
 exports.loginUser = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, expoPushToken } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({
@@ -71,7 +71,7 @@ exports.loginUser = async (req, res) => {
     if (!user || !(await user.comparePassword(password))) {
       console.warn(`[AUTH] Failed login attempt: ${normalizedEmail}`);
       return res
-        .status(500) // was 402 (Payment Required) — should be 401 (Unauthorized)
+        .status(401) // Corrected from 500 to 401 Unauthorized
         .json({ success: false, message: "Invalid credentials" });
     }
 
@@ -97,7 +97,13 @@ exports.loginUser = async (req, res) => {
       });
     }
 
-    // 3. Proceed with successful login
+    // 3. Update Expo Push Token if provided in request
+    if (expoPushToken) {
+      user.expoPushToken = expoPushToken;
+      await user.save();
+    }
+
+    // 4. Proceed with successful login
     console.log(
       `[AUTH] User login: ${normalizedEmail}. Sending notification...`
     );
@@ -118,6 +124,7 @@ exports.loginUser = async (req, res) => {
         _id: user._id,
         fullName: user.fullName,
         email: user.email,
+        expoPushToken: user.expoPushToken,
       },
     });
   } catch (error) {
