@@ -73,4 +73,5 @@ const sendPushNotificationToUser = async (userId, messageData) => {
   }
 };
 
+
 module.exports = { sendPushNotificationToUser };
