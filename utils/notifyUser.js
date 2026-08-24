@@ -20,32 +20,28 @@ const sendPushNotificationToUser = async (userId, messageData) => {
       return;
     }
 
-    if (!user.expoPushToken || user.expoPushToken.length === 0) {
-      console.log(`User ${userId} has no push tokens`);
+    const pushToken = user.expoPushToken;
+
+    // Check if token exists and is a valid Expo push token string
+    if (!pushToken || !Expo.isExpoPushToken(pushToken)) {
+      console.log(`No valid Expo push token found for user ${userId}`);
       return;
     }
 
-    const messages = user.expoPushToken
-      .filter(Expo.isExpoPushToken)
-      .map((token) => ({
-        to: token,
+    const messages = [
+      {
+        to: pushToken,
         sound,
         title,
         body,
-        // Everything the client needs when the app is opened from the notification
         data: {
           router,
-          ...data, // type, roomId, callerId, etc.
+          ...data,
         },
-        // Optional but recommended for calls
         priority: "high",
-        channelId: "calls", // create this channel on Android
-      }));
-
-    if (messages.length === 0) {
-      console.log(`No valid Expo push tokens for user ${userId}`);
-      return;
-    }
+        channelId: "calls",
+      },
+    ];
 
     const chunks = expo.chunkPushNotifications(messages);
     for (const chunk of chunks) {
