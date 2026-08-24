@@ -250,10 +250,10 @@ router.post("/login", async (req, res) => {
     }
 
     // 4. Force update expoPushToken on every login if provided
-    if (expoPushToken !== undefined) {
-      user.expoPushToken = expoPushToken;
-      console.log(`📲 [login] Force updated expoPushToken for user ${user._id}`);
-    }
+    // if (expoPushToken !== undefined) {
+    //   user.expoPushToken = expoPushToken;
+    //   console.log(`📲 [login] Force updated expoPushToken for user ${user._id}`);
+    // }
 
     await user.save();
 
@@ -268,11 +268,11 @@ router.post("/login", async (req, res) => {
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
-        expoPushToken: user.expoPushToken,
+       // expoPushToken: user.expoPushToken,
         notificationPreferences: user.notificationPreferences,
       },
     };
-    
+
 
     return res.json(responsePayload);
   } catch (error) {

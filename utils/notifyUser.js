@@ -44,12 +44,28 @@ const sendPushNotificationToUser = async (userId, messageData) => {
     ];
 
     const chunks = expo.chunkPushNotifications(messages);
+    const tickets = [];
+
     for (const chunk of chunks) {
       try {
-        const receipts = await expo.sendPushNotificationsAsync(chunk);
-        console.log("Push notification receipts:", receipts);
+        const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+        tickets.push(...ticketChunk);
       } catch (err) {
-        console.error("Error sending push notifications chunk:", err);
+        console.error("Error sending push notification chunk:", err);
+      }
+    }
+
+    // Inspect tickets for immediate errors (e.g., DeviceNotRegistered)
+    for (const ticket of tickets) {
+      if (ticket.status === "error") {
+        console.error(`Error sending notification ticket: ${ticket.message}`);
+        if (ticket.details && ticket.details.error) {
+          console.error(`Error code: ${ticket.details.error}`);
+        }
+      } else if (ticket.status === "ok") {
+        console.log(
+          `Notification ticket enqueued successfully with ID: ${ticket.id}`
+        );
       }
     }
   } catch (err) {
