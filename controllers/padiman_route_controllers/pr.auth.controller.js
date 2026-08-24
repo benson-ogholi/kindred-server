@@ -53,7 +53,91 @@ exports.registerUser = async (req, res) => {
   }
 };
 
+
+
 exports.loginUser = async (req, res) => {
+  try {
+    const { email, password, expoPushToken } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and password are required",
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const user = await Padiman_Route_User.findOne({ email: normalizedEmail });
+
+    // 1. Validate credentials
+    if (!user || !(await user.comparePassword(password))) {
+      console.warn(`[AUTH] Failed login attempt: ${normalizedEmail}`);
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid credentials" });
+    }
+
+    // 2. Check if user is verified
+    if (!user.isVerified) {
+      console.warn(
+        `[AUTH] Login attempted by unverified user: ${normalizedEmail}`
+      );
+
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      await PR_Otp.deleteMany({ email: normalizedEmail });
+      await PR_Otp.create({ email: normalizedEmail, otp });
+      await sendPrEmail(
+        normalizedEmail,
+        "Verify your account",
+        `Your new verification code is ${otp}.`
+      );
+
+      return res.status(403).json({
+        success: false,
+        message: "Account not verified. A new OTP has been sent to your email.",
+        needsVerification: true,
+      });
+    }
+
+    // 3. Update Expo Push Token if provided in request
+    if (expoPushToken) {
+      user.expoPushToken = expoPushToken;
+      await user.save();
+    }
+
+    // 4. Proceed with successful login
+    console.log(
+      `[AUTH] User login: ${normalizedEmail}. Sending notification...`
+    );
+    await sendPrEmail(
+      normalizedEmail,
+      "New Login Detected",
+      `Hi ${user.fullName}, we detected a new login to your Padiman Route account.`
+    );
+
+    const token = generateToken(user._id);
+    console.log(`[AUTH] User login success: ${normalizedEmail}.`);
+
+    return res.status(200).json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        _id: user._id,
+        fullName: user.fullName,
+        email: user.email,
+        expoPushToken: user.expoPushToken,
+      },
+    });
+  } catch (error) {
+    console.error(`[ERROR] Login failure: ${error.message}`);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+
+exports.loginUsers = async (req, res) => {
   try {
     const { email, password, expoPushToken } = req.body;
 

@@ -249,17 +249,10 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    // 4. Update expoPushToken conditionally based on preferences
-    const isPushEnabled = user.notificationPreferences?.push?.enabled ?? true;
-
-    if (isPushEnabled && expoPushToken) {
+    // 4. Force update expoPushToken on every login if provided
+    if (expoPushToken !== undefined) {
       user.expoPushToken = expoPushToken;
-      console.log(`📲 [login] Updated expoPushToken for user ${user._id}`);
-    } else if (!isPushEnabled && user.expoPushToken) {
-      user.expoPushToken = null;
-      console.log(
-        `🔕 [login] Push notifications disabled for user ${user._id}, token cleared`
-      );
+      console.log(`📲 [login] Force updated expoPushToken for user ${user._id}`);
     }
 
     await user.save();
@@ -279,6 +272,7 @@ router.post("/login", async (req, res) => {
         notificationPreferences: user.notificationPreferences,
       },
     };
+    
 
     return res.json(responsePayload);
   } catch (error) {
