@@ -1695,7 +1695,7 @@ io.on("connection", (socket) => {
             body: `${callerName} is calling you...`,
             router: "IncomingCallScreen", // change to your actual screen
             data: {
-              type: "incoming_call",
+              type: "/call/audio-call",
               roomId,
               callerId,
               receiverId,
