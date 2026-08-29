@@ -60,6 +60,20 @@ const cooperativeUserSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isPaid: {
+      type: Boolean,
+      default: false,
+    },
+    isPendingSubscription: {
+      type: Boolean,
+      default: false,
+    },
+
+    isFailedSubscription: {
+      type: Boolean,
+      default: false,
+    },
+
     isInvestor: {
       type: Boolean,
       default: false,

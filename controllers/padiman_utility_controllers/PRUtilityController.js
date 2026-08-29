@@ -157,11 +157,14 @@ const loginPRUtility = async (req, res) => {
     const { email, password, expoPushToken } = req.body;
 
     const user = await PRUtility.findOne({ email: email.toLowerCase() });
-    if (!user) return res.status(401).json({ message: "Invalid credentials" });
+    if (!user) {
+      return res.status(401).json({ message: "User not found" });
+    }
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch)
-      return res.status(401).json({ message: "Invalid credentials" });
+    if (!isMatch) {
+      return res.status(401).json({ message: "Incorrect password" });
+    }
 
     // Update expo token if provided
     if (expoPushToken) {

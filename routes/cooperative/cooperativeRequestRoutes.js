@@ -10,6 +10,8 @@ const {
   getCooperativeRequestsByUser,
   getRequestsOverview,
   createAndDisburseDividend,
+  getSubscriptionRequests,
+  updateSubscriptionStatus,
 } = require("../../controllers/cooperative/cooperativeRequestController");
 
 const {
@@ -34,6 +36,15 @@ router.get("/me", protect, getMyCooperativeRequests);
 
 // ── Admin: overview with counts (must be before /:id) ────────
 router.get("/overview", protect, restrictToAdmin, getRequestsOverview);
+
+// ── Admin: subscription requests ─────────────────────────────
+router.get("/subscriptions", protect, restrictToAdmin, getSubscriptionRequests);
+router.patch(
+  "/subscriptions/:id/status",
+  protect,
+  restrictToAdmin,
+  updateSubscriptionStatus
+);
 
 // ── Admin: all requests (filterable) ─────────────────────────
 router.get("/", protect, restrictToAdmin, getCooperativeRequests);

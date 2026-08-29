@@ -124,32 +124,39 @@ const getMyWorks = async (req, res) => {
 const getAvailableWorks = async (req, res) => {
   try {
     const currentUserId = req.user ? req.user.id || req.user._id : null;
+
     const rawWorks = await Work.find({ isPaused: false })
       .populate({
         path: "workman",
         model: "PRUtility",
-        match: { isAvailable: true }, // 1. Only populate if the workman is available
-        // Added 'gender' to the selected fields
-        select: "fullName username email phone profilePicture city isAvailable gender",
+        match: { isAvailable: true },
+        select:
+          "fullName username email phone profilePicture city isAvailable gender",
       })
       .sort({ createdAt: -1 });
 
     const works = rawWorks
-      .filter((work) => work.workman !== null) // 2. Filter out works where the workman did not match the availability check
+      .filter((work) => {
+        // Drop works whose workman is unavailable (populate match failed)
+        if (work.workman === null) return false;
+
+        // Drop works created by the currently logged-in user
+        if (currentUserId) {
+          const workmanId =
+            work.workman?._id?.toString() || work.workman?.toString();
+          if (workmanId === currentUserId.toString()) return false;
+        }
+
+        return true;
+      })
       .map((work) => {
         const workObj = work.toObject();
-        const workmanId =
-          workObj.workman?._id?.toString() || workObj.workman?.toString();
-        const isCreatorOwner = currentUserId
-          ? workmanId === currentUserId.toString()
-          : false;
 
         return {
           ...workObj,
-          isOwner: isCreatorOwner,
+          isOwner: false, // always false here since we filtered out own works
           fullName: workObj.workman?.fullName || null,
           workmanName: workObj.workman?.fullName || null,
-          // Map gender to the top level for easy access if needed
           gender: workObj.workman?.gender || null,
         };
       });
@@ -172,10 +179,15 @@ const getWorkById = async (req, res) => {
     const userId = req.user.id || req.user._id;
     const workId = req.params.id;
 
-    const work = await Work.findById(workId).populate("workman", "fullName username email phone profilePicture isAvailable city");
+    const work = await Work.findById(workId).populate(
+      "workman",
+      "fullName username email phone profilePicture isAvailable city"
+    );
 
     if (!work) {
-      return res.status(404).json({ success: false, message: "Work not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Work not found" });
     }
 
     const isOwner = work.workman._id.toString() === userId.toString();
@@ -183,11 +195,13 @@ const getWorkById = async (req, res) => {
     // Check if a request already exists between this user and this work item
     const existingRequest = await Requesting.findOne({
       targetItem: workId,
-      $or: [{ requester: userId }, { requested: userId }]
+      $or: [{ requester: userId }, { requested: userId }],
     });
 
     // Check if the current user is the one who made the request (requester)
-    const isHiring = existingRequest ? existingRequest.requester.toString() === userId.toString() : false;
+    const isHiring = existingRequest
+      ? existingRequest.requester.toString() === userId.toString()
+      : false;
 
     return res.status(200).json({
       success: true,
@@ -195,8 +209,8 @@ const getWorkById = async (req, res) => {
         ...work.toObject(),
         isOwner,
         existingRequest: existingRequest ? existingRequest._id : null,
-        isHiring
-      }
+        isHiring,
+      },
     });
   } catch (error) {
     console.error(error);
@@ -240,7 +254,9 @@ const updateWork = async (req, res) => {
           ? Number(startingPrice)
           : undefined,
       jobDescription,
-      contactEmail: contactEmail ? contactEmail.trim().toLowerCase() : undefined,
+      contactEmail: contactEmail
+        ? contactEmail.trim().toLowerCase()
+        : undefined,
       contactPhone: contactPhone ? contactPhone.trim() : undefined,
       country,
       state,
@@ -251,8 +267,7 @@ const updateWork = async (req, res) => {
     if (isPaused !== undefined) updateData.isPaused = isPaused;
 
     if (links) {
-      updateData.links =
-        typeof links === "string" ? JSON.parse(links) : links;
+      updateData.links = typeof links === "string" ? JSON.parse(links) : links;
     }
     if (meta) {
       updateData.meta = typeof meta === "string" ? JSON.parse(meta) : meta;

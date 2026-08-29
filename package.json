@@ -23,6 +23,7 @@
     "dotenv": "^17.2.3",
     "expo-server-sdk": "^4.0.0",
     "express": "^5.2.1",
+    "firebase": "^12.18.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.0.2",
     "multer": "^2.0.2",

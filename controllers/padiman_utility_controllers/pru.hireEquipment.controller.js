@@ -125,30 +125,36 @@ const getMyHireEquipment = async (req, res) => {
 const getAvailableHireEquipment = async (req, res) => {
   try {
     const currentUserId = req.user ? req.user.id || req.user._id : null;
-    
+
     const rawEquipment = await HireEquipment.find()
       .populate({
         path: "owner",
         model: "PRUtility",
-        match: { isAvailable: true }, // 1. Only populate if the owner is available
+        match: { isAvailable: true },
         select:
           "fullName username email phone profilePicture city isAvailable gender",
       })
       .sort({ createdAt: -1 });
 
     const equipmentList = rawEquipment
-      .filter((item) => item.owner !== null) // 2. Filter out items where the owner did not match the availability check
+      .filter((item) => {
+        // Drop items whose owner is unavailable (populate match failed)
+        if (item.owner === null) return false;
+
+        // Drop equipment listed by the currently logged-in user
+        if (currentUserId) {
+          const ownerId = item.owner?._id?.toString() || item.owner?.toString();
+          if (ownerId === currentUserId.toString()) return false;
+        }
+
+        return true;
+      })
       .map((item) => {
         const itemObj = item.toObject();
-        const ownerId =
-          itemObj.owner?._id?.toString() || itemObj.owner?.toString();
-        const isCreatorOwner = currentUserId
-          ? ownerId === currentUserId.toString()
-          : false;
 
         return {
           ...itemObj,
-          isOwner: isCreatorOwner,
+          isOwner: false, // always false here since we filtered out own listings
           fullName: itemObj.owner?.fullName || null,
           ownerName: itemObj.owner?.fullName || null,
         };
@@ -164,7 +170,6 @@ const getAvailableHireEquipment = async (req, res) => {
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
-
 // ==========================================
 // 4. GET SINGLE HIRE EQUIPMENT BY ID
 // ==========================================

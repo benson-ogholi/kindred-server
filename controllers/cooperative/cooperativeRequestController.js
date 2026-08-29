@@ -46,10 +46,11 @@ exports.submitCooperativeRequest = async (req, res) => {
       });
     }
 
-    if (!["loan", "savings", "dividends"].includes(type)) {
+    if (!["loan", "savings", "dividends", "subscriptions"].includes(type)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid type. Must be 'loan', 'savings', or 'dividends'.",
+        message:
+          "Invalid type. Must be 'loan', 'savings', 'dividends', or 'subscriptions'.",
       });
     }
 
@@ -118,12 +119,15 @@ exports.submitCooperativeRequest = async (req, res) => {
       };
     }
 
-    // ── Credit (savings deposit needs proof) ─────────────────
-    if (transactionType === "credit" && type === "savings") {
+    // ── Credit (savings or subscriptions payment needs proof) ──
+    if (
+      transactionType === "credit" &&
+      (type === "savings" || type === "subscriptions")
+    ) {
       if (!file) {
         return res.status(400).json({
           success: false,
-          message: "Proof of payment picture is required for credit requests.",
+          message: `Proof of payment picture is required for ${type} credit requests.`,
         });
       }
       proofUrl = await uploadToBackblaze(
@@ -169,23 +173,19 @@ exports.submitCooperativeRequest = async (req, res) => {
       }
     }
 
-    // ── Transfer ─────────────────────────────────────────────
+    // ── Transfer (Proof required, bank details removed) ──────
     if (transactionType === "transfer") {
-      if (!accountName || !accountNumber || !bankName) {
+      if (!file) {
         return res.status(400).json({
           success: false,
-          message:
-            "Bank details (accountName, accountNumber, bankName) are required for transfers.",
+          message: "Proof of payment is required for transfer requests.",
         });
       }
-      finalBankDetails = { accountName, accountNumber, bankName };
-      if (file) {
-        proofUrl = await uploadToBackblaze(
-          file.buffer,
-          file.originalname,
-          `cooperative-proofs/${type}-transfer`
-        );
-      }
+      proofUrl = await uploadToBackblaze(
+        file.buffer,
+        file.originalname,
+        `cooperative-proofs/${type}-transfer`
+      );
     }
 
     const requestPayload = {
@@ -207,6 +207,16 @@ exports.submitCooperativeRequest = async (req, res) => {
 
     const newRequest = await CooperativeRequest.create(requestPayload);
     console.log("✅ [COOP_REQUEST] Saved successfully:", newRequest._id);
+
+    // If it's a subscription request, set user's isPendingSubscription to true
+    if (type === "subscriptions") {
+      await CooperativeUser.findByIdAndUpdate(userId, {
+        isPendingSubscription: true,
+      });
+      console.log(
+        `✅ [USER_PENDING_UPDATE] User ${userId} isPendingSubscription set to true.`
+      );
+    }
 
     // Send submission confirmation email
     try {
@@ -251,7 +261,6 @@ exports.submitCooperativeRequest = async (req, res) => {
     });
   }
 };
-
 // ==================== 2. UPDATE REQUEST STATUS ====================
 exports.updateRequestStatus = async (req, res) => {
   console.log("==================================================");
@@ -812,6 +821,141 @@ exports.createAndDisburseDividend = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: error.message || "Failed to create and disburse dividends.",
+    });
+  }
+};
+
+// ==================== 8. GET ALL SUBSCRIPTION REQUESTS ====================
+exports.getSubscriptionRequests = async (req, res) => {
+  try {
+    const { status } = req.query;
+    const filter = { type: "subscriptions" };
+    if (status) filter.status = status;
+
+    const requests = await CooperativeRequest.find(filter)
+      .populate(
+        "userId",
+        "name firstName lastName email phone countryCode isPaid"
+      )
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      count: requests.length,
+      data: requests,
+    });
+  } catch (error) {
+    console.error("❌ [GET_SUBSCRIPTION_REQUESTS_ERROR]:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch subscription requests.",
+    });
+  }
+};
+
+// ==================== 9. UPDATE SUBSCRIPTION REQUEST STATUS ====================
+// ==================== 9. UPDATE SUBSCRIPTION REQUEST STATUS ====================
+exports.updateSubscriptionStatus = async (req, res) => {
+  console.log("==================================================");
+  console.log(
+    "🔄 [SUBSCRIPTION_STATUS_UPDATE] Updating subscription ID:",
+    req.params.id
+  );
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!["approved", "rejected"].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Status must be either 'approved' or 'rejected'.",
+      });
+    }
+
+    const requestItem = await CooperativeRequest.findOne({
+      _id: id,
+      type: "subscriptions",
+    });
+
+    if (!requestItem) {
+      return res.status(404).json({
+        success: false,
+        message: "Subscription request not found.",
+      });
+    }
+
+    if (requestItem.status === "approved") {
+      return res.status(400).json({
+        success: false,
+        message: "This subscription request has already been approved.",
+      });
+    }
+
+    requestItem.status = status;
+    await requestItem.save();
+
+    // Update user subscription and payment flags based on approval or rejection
+    let userUpdateFields = {};
+    if (status === "approved") {
+      userUpdateFields = {
+        isPaid: true,
+        isPendingSubscription: false,
+        isFailedSubscription: false,
+      };
+    } else if (status === "rejected") {
+      userUpdateFields = {
+        isPaid: false,
+        isPendingSubscription: false,
+        isFailedSubscription: true,
+      };
+    }
+
+    const updatedUser = await CooperativeUser.findByIdAndUpdate(
+      requestItem.userId,
+      userUpdateFields,
+      { new: true }
+    );
+
+    console.log(
+      `✅ [USER_SUBSCRIPTION_UPDATE] User ${updatedUser?._id} updated -> isPaid: ${updatedUser?.isPaid}, isPendingSubscription: ${updatedUser?.isPendingSubscription}, isFailedSubscription: ${updatedUser?.isFailedSubscription}`
+    );
+
+    // Send status update email
+    try {
+      const user = await CooperativeUser.findById(requestItem.userId).select(
+        "firstName email"
+      );
+      if (user && user.email) {
+        await sendWatalopiaEmail({
+          to: user.email,
+          subject: `Subscription Request ${
+            status === "approved" ? "Approved" : "Rejected"
+          }`,
+          template: "requestStatus",
+          data: {
+            firstName: user.firstName,
+            request: requestItem,
+            status,
+          },
+        });
+      }
+    } catch (emailErr) {
+      console.error(
+        "Failed to send subscription status email:",
+        emailErr.message
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Subscription request successfully ${status}.`,
+      data: requestItem,
+    });
+  } catch (error) {
+    console.error("❌ [SUBSCRIPTION_STATUS_UPDATE_ERROR]:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to update subscription status.",
     });
   }
 };

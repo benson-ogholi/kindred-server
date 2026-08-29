@@ -14,7 +14,7 @@ const cooperativeRequestSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["loan", "savings", "dividends"],
+      enum: ["loan", "savings", "dividends", "subscriptions"],
       required: true,
     },
     transactionType: {

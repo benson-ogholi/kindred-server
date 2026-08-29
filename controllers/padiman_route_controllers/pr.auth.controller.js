@@ -69,15 +69,26 @@ exports.loginUser = async (req, res) => {
     const normalizedEmail = email.toLowerCase().trim();
     const user = await Padiman_Route_User.findOne({ email: normalizedEmail });
 
-    // 1. Validate credentials
-    if (!user || !(await user.comparePassword(password))) {
-      console.warn(`[AUTH] Failed login attempt: ${normalizedEmail}`);
-      return res
-        .status(401)
-        .json({ success: false, message: "Invalid credentials" });
+    // 1. Check if user exists
+    if (!user) {
+      console.warn(`[AUTH] Login attempt for non-existent user: ${normalizedEmail}`);
+      return res.status(404).json({ 
+        success: false, 
+        message: "User not found" 
+      });
     }
 
-    // 2. Check if user is verified
+    // 2. Validate password
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      console.warn(`[AUTH] Invalid password attempt for: ${normalizedEmail}`);
+      return res.status(401).json({ 
+        success: false, 
+        message: "Invalid password" 
+      });
+    }
+
+    // 3. Check if user is verified
     if (!user.isVerified) {
       console.warn(
         `[AUTH] Login attempted by unverified user: ${normalizedEmail}`
@@ -99,13 +110,13 @@ exports.loginUser = async (req, res) => {
       });
     }
 
-    // 3. Update Expo Push Token if provided in request
+    // 4. Update Expo Push Token if provided in request
     if (expoPushToken) {
       user.expoPushToken = expoPushToken;
       await user.save();
     }
 
-    // 4. Proceed with successful login
+    // 5. Proceed with successful login
     console.log(
       `[AUTH] User login: ${normalizedEmail}. Sending notification...`
     );
