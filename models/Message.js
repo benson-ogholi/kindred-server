@@ -57,6 +57,10 @@ const MessageSchema = new mongoose.Schema({
     type: String,
     default: "",
   },
+  senderProfilePicture: {
+    type: String,
+    default: "",
+  },
   timestamp: {
     type: Date,
     default: Date.now,

@@ -66,7 +66,7 @@ const cooperative_savings = require("./routes/cooperative/savingsRoutes");
 const cooperative_wallet = require("./routes/cooperative/walletRoutes");
 const cooperative_payments = require("./routes/cooperative/cooperativePaymentRouter");
 const cooperative_requests = require("./routes/cooperative/cooperativeRequestRoutes");
-const User = require('./models/User')
+const User = require("./models/User");
 
 const app = express();
 const server = http.createServer(app);
@@ -1334,7 +1334,6 @@ io.on("connection", (socket) => {
       console.error("❌ [join_room] Error joining room:", err);
     }
   });
-
   socket.on("send_message", async (data) => {
     console.log(
       "📥 [send_message] Received message payload from:",
@@ -1346,7 +1345,7 @@ io.on("connection", (socket) => {
     const {
       uuid: roomUuid,
       message: textMessage,
-      fullName: senderName,
+      fullName: senderName, // ← this is the correct variable name
       userId: senderId,
       receiverId,
       messageUuid,
@@ -1354,6 +1353,7 @@ io.on("connection", (socket) => {
       mediaUri: base64Media,
       duration = 0,
       receiverProfilePicture = "",
+      senderProfilePicture = "",
     } = data;
 
     if (!roomUuid || !senderId || !receiverId || !messageUuid) {
@@ -1366,6 +1366,7 @@ io.on("connection", (socket) => {
         videouri = "",
         audioUri = "";
 
+      // Upload media if present
       if (base64Media && messageType !== "text") {
         console.log(
           `⏳ [send_message] Processing base64 media upload for type: ${messageType}...`
@@ -1391,22 +1392,19 @@ io.on("connection", (socket) => {
         console.log(
           "✅ [send_message] MEDIA UPLOADED:",
           JSON.stringify(
-            {
-              messageType,
-              url: uploadedUrl,
-              room: roomUuid,
-            },
+            { messageType, url: uploadedUrl, room: roomUuid },
             null,
             2
           )
         );
       }
 
+      // Save to DB
       console.log(`⏳ [send_message] Saving new general chat message to DB...`);
       const newMessage = new Message({
         roomUuid,
         message: textMessage || getDefaultMessage(messageType),
-        senderName,
+        senderName: senderName || "User", // ✅ fixed
         senderId,
         receiverId,
         messageUuid,
@@ -1416,6 +1414,7 @@ io.on("connection", (socket) => {
         audioUri,
         duration,
         receiverProfilePicture,
+        senderProfilePicture,
         timestamp: new Date(),
         isRead: false,
       });
@@ -1423,10 +1422,11 @@ io.on("connection", (socket) => {
       await newMessage.save();
       console.log(`✅ [send_message] Message saved with ID: ${newMessage._id}`);
 
+      // Payload to broadcast
       const messageToSend = {
         uuid: messageUuid,
         message: newMessage.message,
-        senderName: newMessage.senderName,
+        senderName: newMessage.senderName, // ✅ fixed
         senderId: newMessage.senderId,
         timestamp: newMessage.timestamp.toISOString(),
         messageType: newMessage.messageType,
@@ -1434,6 +1434,8 @@ io.on("connection", (socket) => {
         videouri: newMessage.videouri,
         audioUri: newMessage.audioUri,
         duration: newMessage.duration,
+        senderProfilePicture: newMessage.senderProfilePicture,
+        receiverProfilePicture: newMessage.receiverProfilePicture,
       };
 
       console.log(
@@ -1441,12 +1443,13 @@ io.on("connection", (socket) => {
         JSON.stringify(messageToSend, null, 2)
       );
 
+      // Broadcast to room
       io.to(roomUuid).emit("receive_message", messageToSend);
       console.log(
         `✅ [send_message] Broadcasted 'receive_message' to room: ${roomUuid}`
       );
 
-      // ========== PUSH NOTIFICATION TO RECEIVER ==========
+      // ========== PUSH NOTIFICATION ==========
       try {
         let notificationBody = newMessage.message;
 
@@ -1458,13 +1461,17 @@ io.on("connection", (socket) => {
         await sendPushNotificationToUser(receiverId, {
           title: senderName || "New Message",
           body: notificationBody,
-          router: "ChatScreen", // change to your actual screen name if different
+          router: "/messages/chat",
           data: {
             type: "chat_message",
-            roomUuid,
+            uuid: roomUuid,
             messageUuid,
             senderId,
+            senderName: newMessage.senderName,
             receiverId,
+            receiverName: data.receiverName || "", // if you start sending it from client
+            receiverProfilePicture: newMessage.receiverProfilePicture,
+            senderProfilePicture: newMessage.senderProfilePicture,
             messageType,
           },
           sound: "default",
@@ -1479,8 +1486,9 @@ io.on("connection", (socket) => {
           notifErr
         );
       }
-      // ===================================================
+      // =======================================
 
+      // Unread count
       console.log(
         `⏳ [send_message] Calculating unread count for receiver: ${receiverId}...`
       );
@@ -1494,6 +1502,19 @@ io.on("connection", (socket) => {
         unreadCount,
         lastMessage: newMessage.message,
       });
+
+      // Also emit a personal event so Inbox can update even if user is not in the room
+      io.to(receiverId).emit(`latest_msg_${receiverId}`, {
+        roomUuid,
+        lastMessage: newMessage.message,
+        timestamp: newMessage.timestamp,
+        senderId,
+        senderName: newMessage.senderName,
+        receiverId,
+        unreadCount,
+        profilePicture: newMessage.senderProfilePicture, // so inbox shows the right avatar
+      });
+
       console.log(
         `✅ [send_message] Broadcasted 'unread_update' with count: ${unreadCount}`
       );
@@ -1693,17 +1714,40 @@ io.on("connection", (socket) => {
           await sendPushNotificationToUser(receiverId, {
             title: "Incoming Call",
             body: `${callerName} is calling you...`,
-            router: "/call/audio-call", // change to your actual screen
+            priority: "high",
+            channelId: "incoming_calls", // Android high-priority channel
+            sound: "ringtone", 
+            
+            // Android specific payload configurations for heads-up full screen call overlay
+            android: {
+              channelId: "incoming_calls",
+              priority: "max",
+              importance: "max",
+              sound: "ringtone",
+              vibrate: [0, 500, 200, 500],
+              category: "call", // Tells Android OS this is an urgent phone/audio call
+              visibility: "public", // Ensures it shows up on locked screens
+              // fullScreenAction triggers the heads-up ringing display layout
+              fullScreenAction: {
+                id: "default",
+              },
+            },
+
+            // Unified data payload for your client app to handle routing and call keeping
             data: {
-              type: "/call/audio-call",
+              type: "incoming_call", 
+              router: "/call/audio-call",
               roomId,
               callerId,
               receiverId,
               callerName,
               callerProfilePicture: callerUser?.profilePicture || "",
+              receiverName,
+              receiverProfilePicture: receiverUser?.profilePicture || "",
+              isCaller: "false",
             },
-            sound: "default",
           });
+          
           console.log(
             `📞 [kookohor-join-room] Call push notification sent to ${receiverId}`
           );
@@ -2083,9 +2127,7 @@ mongoose
           `${user.firstName || ""} ${user.lastName || ""}`.trim() ||
           "N/A";
 
-        const expoToken =
-          user.expoPushToken ||
-          null;
+        const expoToken = user.expoPushToken || null;
 
         console.log(`${index + 1}.`, {
           name,
