@@ -1458,7 +1458,7 @@ io.on("connection", (socket) => {
         await sendPushNotificationToUser(receiverId, {
           title: senderName || "New Message",
           body: notificationBody,
-          router: "ChatScreen", // change to your actual screen name if different
+          router: "/messages/chat", // change to your actual screen name if different
           data: {
             type: "chat_message",
             roomUuid,
@@ -1693,7 +1693,7 @@ io.on("connection", (socket) => {
           await sendPushNotificationToUser(receiverId, {
             title: "Incoming Call",
             body: `${callerName} is calling you...`,
-            router: "IncomingCallScreen", // change to your actual screen
+            router: "/call/audio-call", // change to your actual screen
             data: {
               type: "/call/audio-call",
               roomId,
