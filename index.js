@@ -1455,22 +1455,21 @@ io.on("connection", (socket) => {
         else if (messageType === "voice")
           notificationBody = "🎤 Sent a voice message";
 
-          await sendPushNotificationToUser(receiverId, {
-            title: senderName || "New Message",
-            body: notificationBody,
-            router: "/messages/chat", 
-            data: {
-              type: "chat_message",
-              uuid: roomUuid,           // Matches chat route param `uuid`
-              senderId: receiverId,     // The recipient of the notification becomes the sender context on open
-              senderName: receiverName || "",
-              receiverId: senderId,     // The original sender becomes the receiver context
-              receiverName: senderName,
-              receiverProfilePicture: senderProfilePicture || "",
-              isOnline: "true",
-            },
-            sound: "default",
-          });
+        await sendPushNotificationToUser(receiverId, {
+          title: senderName || "New Message",
+          body: notificationBody,
+          router: "ChatScreen", // change to your actual screen name if different
+          data: {
+            type: "chat_message",
+            roomUuid,
+            messageUuid,
+            senderId,
+            receiverId,
+            messageType,
+          },
+          sound: "default",
+        });
+
         console.log(
           `🔔 [send_message] Push notification sent to receiver: ${receiverId}`
         );
