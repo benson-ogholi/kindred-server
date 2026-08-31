@@ -2084,11 +2084,7 @@ mongoose
           "N/A";
 
         const expoToken =
-          user.expoToken ||
           user.expoPushToken ||
-          user.pushToken ||
-          user.deviceToken ||
-          user.fcmToken ||
           null;
 
         console.log(`${index + 1}.`, {
