@@ -36,7 +36,7 @@ const baseLayout = (content) => `
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <title>Watalopia</title>
+  <title>Watolopia</title>
   <style>
     /* Reset & Client-Specific Defaults */
     body {
@@ -192,7 +192,7 @@ const baseLayout = (content) => `
     <table class="main-container" cellpadding="0" cellspacing="0" align="center">
       <tr>
         <td class="header">
-          <div class="brand-logo">Watalopia</div>
+          <div class="brand-logo">Watolopia</div>
           <h1>Cooperative Savings & Loans</h1>
         </td>
       </tr>
@@ -203,7 +203,7 @@ const baseLayout = (content) => `
       </tr>
       <tr>
         <td class="footer">
-          &copy; ${new Date().getFullYear()} Watalopia. All rights reserved.<br>
+          &copy; ${new Date().getFullYear()} Watolopia. All rights reserved.<br>
           This is an automated notification—please do not reply directly to this email.
         </td>
       </tr>
@@ -221,7 +221,7 @@ const getOtpEmailTemplate = (otp, purpose = "verification") => {
   const title = isReset ? "Reset Your Password" : "Verify Your Account";
   const message = isReset
     ? "We received a request to reset your password. Use the secure authorization code below to proceed safely."
-    : "Welcome to Watalopia! Please use the verification code below to complete your secure onboarding.";
+    : "Welcome to Watolopia! Please use the verification code below to complete your secure onboarding.";
 
   return baseLayout(`
     <div class="title">${title}</div>
@@ -261,7 +261,7 @@ const getAdminCreatedAccountTemplate = (
     <p class="description">
       Hello ${
         firstName || "there"
-      }, an administrator has provisioned a new Watalopia account for your profile.
+      }, an administrator has provisioned a new Watolopia account for your profile.
     </p>
     <div class="info-box">
       <div style="margin-bottom: 8px;"><span style="color:${
@@ -291,7 +291,7 @@ const getLoginNotificationTemplate = (
     <p class="description">
       Hi ${
         firstName || "there"
-      }, we noticed a new sign-in to your Watalopia account.
+      }, we noticed a new sign-in to your Watolopia account.
     </p>
     <div class="info-box">
       <div style="margin-bottom: 8px;"><span style="color:${
@@ -407,7 +407,7 @@ const getDividendDisbursedTemplate = (firstName, amount, title) => {
       </p>
     </div>
     <p style="color:${COLORS.textMuted}; font-size:13px; text-align: center;">
-      Thank you for being an active contributor to the Watalopia cooperative ecosystem.
+      Thank you for being an active contributor to the Watolopia cooperative ecosystem.
     </p>
   `);
 };
@@ -502,7 +502,7 @@ const sendWatalopiaEmail = async (options) => {
   }
 
   const mailOptions = {
-    from: `"Watalopia" <${
+    from: `"Watolopia" <${
       process.env.EMAIL_USER || "kokohorcircle@gmail.com"
     }>`,
     to,
