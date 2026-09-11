@@ -1,15 +1,13 @@
 const Request = require("../../models/padiman_route_models/Request");
+const User = require("../../models/padiman_route_models/Padiman_Route_User"); // Added User model to check driver details
 const { sendNotification } = require("../../utils/pr/pr_push");
-const { uploadToBackblaze } = require("../../utils/uploadToBackblaze");
-
-// Import upload utility if available (fallback safe check included)
+const { uploadToBackblaze } = require("../../utils/uploadToBackblaze"); // Import upload utility if available (fallback safe check included)
 
 /**
  * ============================================================
  *  META BUILDERS — one per request `type`
  * ============================================================
  */
-
 function toBool(value, fallback = false) {
   if (typeof value === "boolean") return value;
   if (value === "true") return true;
@@ -84,11 +82,9 @@ function buildDeliverPackageMeta(body) {
 function buildJoinRideMeta(body) {
   const src = body.meta || body;
   const { notes } = src;
-
   const meta = {
     notes: notes || "",
   };
-
   return { meta, errors: [] };
 }
 
@@ -138,7 +134,6 @@ function validateCommonFields(body) {
  *  NOTIFICATION COPY
  * ============================================================
  */
-
 const CREATED_COPY = {
   "send-package": {
     title: "Package request submitted",
@@ -196,6 +191,42 @@ exports.createRequest = async (req, res) => {
       });
     }
 
+    // Check if the request type requires a verified/approved driver profile (e.g. offering a ride or offering delivery)
+    if (type === "offer-ride" || type === "deliver-package") {
+      const user = await User.findById(req.user);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User profile not found",
+        });
+      }
+
+      // Check if driver is approved or has required driver credentials
+      if (!user.isDriverApproved && !user.isDriver) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "You must be an approved driver to offer rides or delivery services.",
+        });
+      }
+
+      // Check for vehicle model, plate number, and driver's license number existence
+      const missingDriverDetails = [];
+      if (!user.vehicleModel) missingDriverDetails.push("vehicleModel");
+      if (!user.plateNumber) missingDriverDetails.push("plateNumber");
+      if (!user.driverLicenseNumber)
+        missingDriverDetails.push("driverLicenseNumber");
+
+      if (missingDriverDetails.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Incomplete driver vehicle or license details in your profile.",
+          missingFields: missingDriverDetails,
+        });
+      }
+    }
+
     const commonErrors = validateCommonFields(req.body);
     const { meta, errors: metaErrors } = META_BUILDERS[type](req.body);
     const allErrors = [...commonErrors, ...metaErrors];
@@ -212,9 +243,7 @@ exports.createRequest = async (req, res) => {
       if (!loc || typeof loc !== "object") {
         return { address: "" };
       }
-
       const result = { address: loc.address || "" };
-
       if (
         loc.coordinates &&
         Array.isArray(loc.coordinates.coordinates) &&
@@ -236,7 +265,6 @@ exports.createRequest = async (req, res) => {
           coordinates: [Number(loc.coordinates[0]), Number(loc.coordinates[1])],
         };
       }
-
       return result;
     };
 
@@ -283,7 +311,6 @@ exports.getUserRequests = async (req, res) => {
   try {
     const { status, type } = req.query;
     const filter = { userId: req.user };
-
     if (status) filter.status = status;
     if (type) filter.type = type;
 
@@ -307,7 +334,6 @@ exports.getUserRequests = async (req, res) => {
 exports.getRequest = async (req, res) => {
   try {
     const request = await Request.findById(req.params.id);
-
     if (!request) {
       return res.status(404).json({
         success: false,
@@ -332,7 +358,6 @@ exports.getRequest = async (req, res) => {
 exports.updateRequest = async (req, res) => {
   try {
     const request = await Request.findById(req.params.id);
-
     if (!request) {
       return res.status(404).json({
         success: false,
@@ -384,7 +409,6 @@ exports.updateRequest = async (req, res) => {
           errors: allErrors,
         });
       }
-
       req.body.meta = meta;
     }
 
@@ -451,7 +475,6 @@ exports.updateRequest = async (req, res) => {
   }
 };
 
-
 exports.updateRequestProgress = async (req, res) => {
   try {
     const { id } = req.params;
@@ -459,7 +482,6 @@ exports.updateRequestProgress = async (req, res) => {
     let handOverProof = req.body.handOverProof;
 
     const requestItem = await Request.findById(id);
-
     if (!requestItem) {
       return res.status(404).json({
         success: false,
@@ -480,34 +502,34 @@ exports.updateRequestProgress = async (req, res) => {
 
     // Update fields if provided
     if (status) requestItem.status = status;
-    if (currentLocation !== undefined) requestItem.currentLocation = currentLocation;
+    if (currentLocation !== undefined)
+      requestItem.currentLocation = currentLocation;
     if (handOverProof !== undefined) requestItem.handOverProof = handOverProof;
 
     await requestItem.save();
 
     // === SYNC OTHER LINKED REQUESTS ===
-    // Find and update other requests where inRideWith or assignedTo matches 
-    // the current request's ID or string representations.
     const queryIdentifiers = [
-      id, 
+      id,
       requestItem._id.toString(),
       requestItem.inRideWith,
-      requestItem.assignedTo
-    ].filter(Boolean); // Remove null/undefined values
+      requestItem.assignedTo,
+    ].filter(Boolean);
 
     const updateFields = {};
     if (status) updateFields.status = status;
-    if (currentLocation !== undefined) updateFields.currentLocation = currentLocation;
+    if (currentLocation !== undefined)
+      updateFields.currentLocation = currentLocation;
     if (handOverProof !== undefined) updateFields.handOverProof = handOverProof;
 
     if (Object.keys(updateFields).length > 0) {
       await Request.updateMany(
         {
-          _id: { $ne: requestItem._id }, // Exclude the current request
+          _id: { $ne: requestItem._id },
           $or: [
             { inRideWith: { $in: queryIdentifiers } },
-            { assignedTo: { $in: queryIdentifiers } }
-          ]
+            { assignedTo: { $in: queryIdentifiers } },
+          ],
         },
         { $set: updateFields }
       );
@@ -549,6 +571,7 @@ exports.updateRequestProgress = async (req, res) => {
     });
   }
 };
+
 // 6. Get matching requests (Pairing)
 exports.getMatchingRequests = async (req, res) => {
   try {
@@ -558,7 +581,6 @@ exports.getMatchingRequests = async (req, res) => {
     );
 
     const sourceRequest = await Request.findById(id);
-
     if (!sourceRequest) {
       return res.status(404).json({
         success: false,
@@ -566,7 +588,6 @@ exports.getMatchingRequests = async (req, res) => {
       });
     }
 
-    // Corrected target type pairing map
     const targetTypeMap = {
       "send-package": "deliver-package",
       "deliver-package": "send-package",
@@ -575,7 +596,6 @@ exports.getMatchingRequests = async (req, res) => {
     };
 
     const targetType = targetTypeMap[sourceRequest.type];
-
     if (!targetType) {
       return res.status(400).json({
         success: false,
@@ -599,7 +619,6 @@ exports.getMatchingRequests = async (req, res) => {
       const matchesDelivery =
         reqItem.deliveryLocation?.address ===
         sourceRequest.deliveryLocation?.address;
-
       return matchesPickup || matchesDelivery;
     });
 

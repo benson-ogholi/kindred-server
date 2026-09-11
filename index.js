@@ -67,6 +67,7 @@ const cooperative_wallet = require("./routes/cooperative/walletRoutes");
 const cooperative_payments = require("./routes/cooperative/cooperativePaymentRouter");
 const cooperative_requests = require("./routes/cooperative/cooperativeRequestRoutes");
 const User = require("./models/User");
+const pru_verify = require('./routes/pr/pr.verify')
 
 const app = express();
 const server = http.createServer(app);
@@ -114,8 +115,10 @@ app.use("/api/v1/padiman_route/payments", pr_pay);
 app.use("/api/v1/padiman_route/notifications", pr_notify);
 app.use("/api/v1/padiman_route/wallet", pr_wallet);
 app.use("/api/v1/padiman_route/driver", pr_driver);
+app.use("/api/v1/padiman_route/driver/verify", pru_verify);
 app.use("/api/v1/padiman_route/admin", pr_admin);
 app.use("/api/v1/padiman_route/admin/data", pr_admin_data);
+
 app.use("/api/v1/pru/home", pru_home);
 
 app.use(

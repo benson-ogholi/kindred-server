@@ -33,6 +33,14 @@ const padimanRouteUserSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  isDriverApproved: {
+    type: Boolean,
+    default: false,
+  },
+  isUserDocumented: {
+    type: Boolean,
+    default: false,
+  },
   isDriverSuspended: {
     type: Boolean,
     default: false,
@@ -59,7 +67,12 @@ const padimanRouteUserSchema = new mongoose.Schema({
     trim: true,
     sparse: true, // Allows null/undefined for non-drivers
   },
-  // ====================================================
+  ninNumber: {
+    type: String,
+    trim: true,
+    sparse: true,
+    default: null,
+  },
   profileImage: {
     type: String,
     default: null,
@@ -82,6 +95,29 @@ const padimanRouteUserSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  // Verification metadata supporting vehicle applications and structured document statuses
+  verificationMeta: {
+    vehicleApplication: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    verifiedDocuments: {
+      bvnStatus: {
+        type: String,
+        default: "BVN number not verified",
+      },
+      ninStatus: {
+        type: String,
+        default: "NIN number not verified",
+      },
+      verifiedAt: {
+        type: Date,
+        default: null,
+      },
+    },
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
+  },
 });
 
 // Pre-save hook: Hash password before saving to the database
@@ -89,7 +125,6 @@ padimanRouteUserSchema.pre("save", async function () {
   if (!this.isModified("password")) {
     return;
   }
-
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
 });
