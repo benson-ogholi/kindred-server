@@ -20,7 +20,7 @@ function buildSendPackageMeta(body) {
   const errors = [];
   const {
     isPerishable,
-    isFragile,
+    isFragile, 
     senderFullName,
     senderPhone,
     receiverFullName,
