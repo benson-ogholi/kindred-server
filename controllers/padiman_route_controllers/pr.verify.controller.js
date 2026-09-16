@@ -1,11 +1,18 @@
 const PadimanRouteUser = require("../../models/padiman_route_models/Padiman_Route_User");
-const { uploadToBackblaze } = require("../../utils/uploadToBackblaze"); // Import upload utility if available (fallback safe check included)
+const { sendNotification } = require("../../utils/pr/pr_push");
+const { uploadToBackblaze } = require("../../utils/uploadToBackblaze");
 const axios = require("axios");
+
 // Dojah API Configuration
 const DOJAH_BASE_URL = process.env.DOJAH_BASE_URL || "https://api.dojah.io";
-const DOJAH_SECRET_KEY = process.env.DOJAH_SECRET_KEY || ""; // Your Dojah Secret Key
-const DOJAH_APP_ID = process.env.DOJAH_APP_ID || ""; // Your Dojah App ID
+const DOJAH_SECRET_KEY = process.env.DOJAH_SECRET_KEY || "";
+const DOJAH_APP_ID = process.env.DOJAH_APP_ID || "";
 
+/**
+ * @desc    Submit driver application + live Dojah BVN/NIN + Selfie verification
+ * @route   POST /api/v1/padiman_route/driver/apply
+ * @access  Private
+ */
 exports.submitDriverApplication = async (req, res) => {
   console.log("-----------------------------------------");
   console.log("📥 POST /api/v1/padiman_route/driver/apply hit");
@@ -26,16 +33,14 @@ exports.submitDriverApplication = async (req, res) => {
       vehicleType,
       address,
       idType, // "bvn" or "nin"
-      idNumber, // The actual BVN or NIN digits
-      firstName, // User's provided first name for verification matching
-      lastName, // User's provided last name for verification matching
+      idNumber,
+      firstName,
+      lastName,
     } = req.body;
 
+    // ---------- Basic validation ----------
     if (!userId) {
-      console.log("❌ Validation Error: User ID is missing");
-      return res
-        .status(400)
-        .json({ error: "User ID is required for driver application" });
+      return res.status(400).json({ error: "User ID is required" });
     }
 
     if (
@@ -46,34 +51,25 @@ exports.submitDriverApplication = async (req, res) => {
       !idType ||
       !idNumber
     ) {
-      console.log(
-        "❌ Validation Error: Missing required driver application or KYC fields"
-      );
       return res.status(400).json({
         error:
-          "Driver license number, vehicle model, plate number, vehicle type, idType, and idNumber are required",
+          "driverLicenseNumber, vehicleModel, plateNumber, vehicleType, idType and idNumber are required",
       });
     }
 
     const existingUser = await PadimanRouteUser.findById(userId);
     if (!existingUser) {
-      console.log(
-        "❌ Database Error: PadimanRoute user not found with ID:",
-        userId
-      );
       return res.status(404).json({ error: "PadimanRoute user not found" });
     }
 
-    // 1. Handle File Uploads to Backblaze B2 via FormData / Multer
+    // ---------- File handling ----------
     let licenseDocumentUrl = null;
     let selfieUrl = null;
     let selfieBase64 = null;
 
     if (req.files) {
-      // Handle Driver License Document Image
-      if (req.files.licenseDocument && req.files.licenseDocument[0]) {
+      if (req.files.licenseDocument?.[0]) {
         const file = req.files.licenseDocument[0];
-        console.log("📤 Uploading driver license document to Backblaze...");
         licenseDocumentUrl = await uploadToBackblaze(
           file.buffer,
           file.originalname || `license_${userId}.jpg`,
@@ -81,12 +77,9 @@ exports.submitDriverApplication = async (req, res) => {
         );
       }
 
-      // Handle Selfie Image for Dojah Verification & Storage
-      if (req.files.selfie && req.files.selfie[0]) {
+      if (req.files.selfie?.[0]) {
         const file = req.files.selfie[0];
         selfieBase64 = file.buffer.toString("base64");
-
-        console.log("📤 Uploading driver selfie to Backblaze...");
         selfieUrl = await uploadToBackblaze(
           file.buffer,
           file.originalname || `selfie_${userId}.jpg`,
@@ -95,7 +88,7 @@ exports.submitDriverApplication = async (req, res) => {
       }
     }
 
-    // Fallback if base64 selfie was sent directly in req.body
+    // Fallback if selfie came as base64 string in body
     if (!selfieBase64 && req.body.selfieImage) {
       selfieBase64 = req.body.selfieImage.replace(
         /^data:image\/[a-z]+;base64,/,
@@ -104,22 +97,17 @@ exports.submitDriverApplication = async (req, res) => {
     }
 
     if (!selfieBase64) {
-      console.log(
-        "❌ Validation Error: Selfie image is required for Dojah verification"
-      );
-      return res
-        .status(400)
-        .json({
-          error: "A clear selfie image is required for identity verification",
-        });
+      return res.status(400).json({
+        error: "A clear selfie image is required for identity verification",
+      });
     }
 
-    // 2. Perform Dojah KYC Verification (BVN or NIN with Selfie)
+    // ---------- Dojah KYC (BVN or NIN + Selfie) ----------
     const normalizedIdType = idType.toLowerCase().trim();
     if (normalizedIdType !== "bvn" && normalizedIdType !== "nin") {
       return res
         .status(400)
-        .json({ error: "Invalid ID type. Must be either 'bvn' or 'nin'." });
+        .json({ error: "idType must be either 'bvn' or 'nin'" });
     }
 
     const dojahEndpoint = `${DOJAH_BASE_URL}/api/v1/kyc/${normalizedIdType}/verify`;
@@ -128,9 +116,7 @@ exports.submitDriverApplication = async (req, res) => {
       selfie_image: selfieBase64,
     };
 
-    console.log(
-      `🚀 Calling Dojah ${normalizedIdType.toUpperCase()} Verify Endpoint...`
-    );
+    console.log(`🚀 Calling Dojah ${normalizedIdType.toUpperCase()} Verify...`);
 
     let dojahResponse;
     try {
@@ -143,48 +129,64 @@ exports.submitDriverApplication = async (req, res) => {
       });
     } catch (dojahErr) {
       console.error(
-        "❌ Dojah API Error Response:",
+        "❌ Dojah API Error:",
         dojahErr.response?.data || dojahErr.message
       );
+
+      // Mark as rejected
+      await PadimanRouteUser.findByIdAndUpdate(userId, {
+        isDriverApproved: false,
+        isDriverRejected: true,
+        isDriver: false,
+      });
+
       return res.status(400).json({
         error:
-          "Identity verification failed via Dojah. Please check your details and try again.",
+          "Identity verification failed. Please check your details and try again.",
         details: dojahErr.response?.data || dojahErr.message,
+        status: "failed",
       });
     }
 
     const entityData =
       dojahResponse.data?.entity || dojahResponse.data?.data?.entity;
+
     if (!entityData) {
-      console.log(
-        "❌ Dojah Error: Invalid response structure received",
-        dojahResponse.data
-      );
-      return res
-        .status(400)
-        .json({ error: "Could not retrieve identity record from Dojah." });
-    }
+      await PadimanRouteUser.findByIdAndUpdate(userId, {
+        isDriverApproved: false,
+        isDriverRejected: true,
+        isDriver: false,
+      });
 
-    // 3. Validate Selfie Verification Match & Confidence
-    const selfieVerification = entityData.selfie_verification || {};
-    console.log("🔍 Dojah Verification Results:", {
-      match: selfieVerification.match,
-      confidence: selfieVerification.confidence_value,
-    });
-
-    if (
-      !selfieVerification.match ||
-      (selfieVerification.confidence_value &&
-        selfieVerification.confidence_value < 70)
-    ) {
       return res.status(400).json({
-        error:
-          "Selfie verification failed. The provided photo does not match your government identity record.",
-        confidence: selfieVerification.confidence_value,
+        error: "Could not retrieve identity record from Dojah",
+        status: "failed",
       });
     }
 
-    // 4. Ensure Names Match
+    // ---------- Selfie match check ----------
+    const selfieVerification = entityData.selfie_verification || {};
+    const confidence = selfieVerification.confidence_value || 0;
+    const isMatch = selfieVerification.match === true;
+
+    console.log("🔍 Selfie Verification:", { match: isMatch, confidence });
+
+    if (!isMatch || confidence < 70) {
+      await PadimanRouteUser.findByIdAndUpdate(userId, {
+        isDriverApproved: false,
+        isDriverRejected: true,
+        isDriver: false,
+      });
+
+      return res.status(400).json({
+        error:
+          "Selfie verification failed. The provided photo does not match your government record.",
+        confidence,
+        status: "failed",
+      });
+    }
+
+    // ---------- Optional name soft-check ----------
     const recordFirstName = (
       entityData.firstname ||
       entityData.first_name ||
@@ -201,26 +203,12 @@ exports.submitDriverApplication = async (req, res) => {
       .trim()
       .toLowerCase();
 
-    if (firstName && lastName) {
-      const inputFirst = firstName.trim().toLowerCase();
-      const inputLast = lastName.trim().toLowerCase();
-
-      if (
-        recordFirstName &&
-        !recordFirstName.includes(inputFirst) &&
-        !inputFirst.includes(recordFirstName)
-      ) {
-        console.warn(
-          `⚠️ Name mismatch warning: Provided (${inputFirst}) vs Record (${recordFirstName})`
-        );
-      }
-    }
-
-    // 5. Update User Record in Database
+    // ---------- SUCCESS → APPROVE IMMEDIATELY ----------
     const updatedUser = await PadimanRouteUser.findByIdAndUpdate(
       userId,
       {
-        isDriverPending: true,
+        isDriver: true,
+        isDriverApproved: true,
         isDriverRejected: false,
         driverLicenseNumber,
         ...(address && { address }),
@@ -235,13 +223,12 @@ exports.submitDriverApplication = async (req, res) => {
               lastName: recordLastName,
               birthdate: entityData.birthdate,
               gender: entityData.gender,
-              selfieMatch: selfieVerification.match,
-              confidenceValue: selfieVerification.confidence_value,
+              selfieMatch: isMatch,
+              confidenceValue: confidence,
             },
             documents: {
               licenseDocumentUrl,
               selfieUrl,
-              ...(req.body.documents || {}),
             },
             vehicleApplication: {
               vehicleModel,
@@ -256,40 +243,53 @@ exports.submitDriverApplication = async (req, res) => {
       { new: true }
     );
 
-    console.log(
-      "🎉 Driver Application & Dojah Verification Successful for User:",
-      {
-        id: updatedUser._id,
-        email: updatedUser.email,
-        isDriverPending: false,
+    console.log("🎉 Driver approved successfully:", {
+      id: updatedUser._id,
+      email: updatedUser.email,
+    });
+
+    // Notification (non-blocking)
+    sendNotification(updatedUser._id || userId, {
+      title: "Driver Application Approved ✅",
+      body: "Congratulations! Your identity has been verified and you are now an approved driver.",
+      type: "DRIVER_APPLICATION_APPROVED",
+      router: "/driver/application-status",
+      data: {
         driverLicenseNumber: updatedUser.driverLicenseNumber,
-      }
-    );
+        status: "approved",
+      },
+    }).catch((err) => {
+      console.error("⚠️ Notification error:", err?.message || err);
+    });
 
     return res.status(200).json({
-      message:
-        "Driver application submitted successfully with verified identity and is pending review",
-      status: "pending",
+      message: "Driver application approved successfully",
+      status: "approved",
       application: {
         id: updatedUser._id,
         userId: updatedUser._id,
-        status: "pending",
+        status: "approved",
+        isDriver: true,
+        isDriverApproved: true,
+        isDriverRejected: false,
         driverLicenseNumber: updatedUser.driverLicenseNumber,
         vehicleModel,
         plateNumber,
         verifiedIdentity: {
           firstName: recordFirstName,
           lastName: recordLastName,
-          match: selfieVerification.match,
+          match: isMatch,
+          confidence,
         },
         createdAt: new Date(),
       },
     });
   } catch (error) {
-    console.error("🔥 Server Error in /apply driver application:", error);
-    return res
-      .status(500)
-      .json({ error: "Server error while processing driver application" });
+    console.error("🔥 Server Error in /apply:", error);
+    return res.status(500).json({
+      error: "Server error while processing driver application",
+      status: "failed",
+    });
   }
 };
 
@@ -317,36 +317,31 @@ exports.getDriverApplicationStatus = async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // Force isDriverPending to false in the database if it isn't already
-    if (user.isDriverPending !== false) {
-      user.isDriverPending = false;
-      await user.save();
-    }
-
+    // Only two possible states
     let currentStatus = "not_submitted";
     if (user.isDriverApproved) {
       currentStatus = "approved";
     } else if (user.isDriverRejected) {
-      currentStatus = "rejected";
+      currentStatus = "failed";
     }
 
     return res.status(200).json({
       message: "Application status fetched successfully",
       status: currentStatus,
       application: {
-        isDriver: user.isDriver,
-        isDriverPending: false,
-        isDriverApproved: user.isDriverApproved,
-        isDriverRejected: user.isDriverRejected,
-        driverLicenseNumber: user.driverLicenseNumber,
-        meta: user.verificationMeta?.vehicleApplication || null,
+        isDriver: user.isDriver || false,
+        isDriverApproved: user.isDriverApproved || false,
+        isDriverRejected: user.isDriverRejected || false,
+        driverLicenseNumber: user.driverLicenseNumber || null,
+        meta:
+          user.verificationMeta?.driverVerification?.vehicleApplication || null,
       },
     });
   } catch (error) {
     console.error("🔥 Server Error in /application-status:", error);
-    return res
-      .status(500)
-      .json({ error: "Server error while fetching status" });
+    return res.status(500).json({
+      error: "Server error while fetching status",
+    });
   }
 };
 
@@ -652,3 +647,4 @@ exports.getCustomerVerificationStatus = async (req, res) => {
     });
   }
 };
+

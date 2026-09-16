@@ -29,10 +29,7 @@ const padimanRouteUserSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
-  isDriverPending: {
-    type: Boolean,
-    default: false,
-  },
+
   isDriverApproved: {
     type: Boolean,
     default: false,
