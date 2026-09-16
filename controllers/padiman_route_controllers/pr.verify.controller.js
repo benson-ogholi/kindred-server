@@ -261,7 +261,7 @@ exports.submitDriverApplication = async (req, res) => {
       {
         id: updatedUser._id,
         email: updatedUser.email,
-        isDriverPending: updatedUser.isDriverPending,
+        isDriverPending: false,
         driverLicenseNumber: updatedUser.driverLicenseNumber,
       }
     );
