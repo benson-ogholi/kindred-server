@@ -317,17 +317,25 @@ exports.getDriverApplicationStatus = async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+    // Force isDriverPending to false in the database if it isn't already
+    if (user.isDriverPending !== false) {
+      user.isDriverPending = false;
+      await user.save();
+    }
+
     let currentStatus = "not_submitted";
-    if (user.isDriverApproved) currentStatus = "approved";
-    else if (user.isDriverPending) currentStatus = "pending";
-    else if (user.isDriverRejected) currentStatus = "rejected";
+    if (user.isDriverApproved) {
+      currentStatus = "approved";
+    } else if (user.isDriverRejected) {
+      currentStatus = "rejected";
+    }
 
     return res.status(200).json({
       message: "Application status fetched successfully",
       status: currentStatus,
       application: {
         isDriver: user.isDriver,
-        isDriverPending: user.isDriverPending,
+        isDriverPending: false,
         isDriverApproved: user.isDriverApproved,
         isDriverRejected: user.isDriverRejected,
         driverLicenseNumber: user.driverLicenseNumber,
