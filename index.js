@@ -67,7 +67,7 @@ const cooperative_wallet = require("./routes/cooperative/walletRoutes");
 const cooperative_payments = require("./routes/cooperative/cooperativePaymentRouter");
 const cooperative_requests = require("./routes/cooperative/cooperativeRequestRoutes");
 const User = require("./models/User");
-const pru_verify = require('./routes/pr/pr.verify')
+const pru_verify = require("./routes/pr/pr.verify");
 
 const app = express();
 const server = http.createServer(app);
@@ -1719,8 +1719,8 @@ io.on("connection", (socket) => {
             body: `${callerName} is calling you...`,
             priority: "high",
             channelId: "incoming_calls", // Android high-priority channel
-            sound: "ringtone", 
-            
+            sound: "ringtone",
+
             // Android specific payload configurations for heads-up full screen call overlay
             android: {
               channelId: "incoming_calls",
@@ -1738,7 +1738,7 @@ io.on("connection", (socket) => {
 
             // Unified data payload for your client app to handle routing and call keeping
             data: {
-              type: "incoming_call", 
+              type: "incoming_call",
               router: "/call/audio-call",
               roomId,
               callerId,
@@ -1750,7 +1750,7 @@ io.on("connection", (socket) => {
               isCaller: "false",
             },
           });
-          
+
           console.log(
             `📞 [kookohor-join-room] Call push notification sent to ${receiverId}`
           );
@@ -1785,12 +1785,16 @@ io.on("connection", (socket) => {
         .emit("kookohor-offer", { offer, senderSocketId: socket.id });
   });
 
+  // Inside your frontend socket listener for 'kookohor-answer'
+  // index.js (Server)
   socket.on("kookohor-answer", ({ answer, roomId, targetSocketId }) => {
     const target = targetSocketId || roomId || socket.roomId;
-    if (target)
-      socket
-        .to(target)
-        .emit("kookohor-answer", { answer, senderSocketId: socket.id });
+    if (target) {
+      socket.to(target).emit("kookohor-answer", {
+        answer,
+        senderSocketId: socket.id,
+      });
+    }
 
     const activeRoomId = roomId || socket.roomId;
     if (activeRoomId && activeCalls.has(activeRoomId)) {
@@ -1801,7 +1805,6 @@ io.on("connection", (socket) => {
       }
     }
   });
-
   socket.on(
     "kookohor-ice-candidate",
     ({ candidate, roomId, targetSocketId }) => {
