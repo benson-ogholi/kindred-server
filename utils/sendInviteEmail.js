@@ -4,17 +4,16 @@ const nodemailer = require("nodemailer");
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user: "ikennaibenemee@gmail.com",
-    pass: "xfuq qyry thjq ylaa",
+    user: "kokohorcircle@gmail.com",
+    pass: "xrik levq mszq eldc",
   },
 });
-
 /**
  * Sends a styled family invitation email
  * @param {Object} options - to, familyName, inviterName, inviteCode
  */
 const sendInviteEmail = async ({ to, familyName, inviterName, inviteCode }) => {
-  const brandColor = "#EAB308"; // Kindred Gold
+  const brandColor = "#EAB308"; // Kokohor circle Gold
 
   const html = `
   <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #f0f0f0; border-radius: 12px;">
@@ -31,7 +30,7 @@ const sendInviteEmail = async ({ to, familyName, inviterName, inviteCode }) => {
     <div style="color: #334155; line-height: 1.6; font-size: 14px;">
       <p><strong>How to join:</strong></p>
       <ol style="padding-left: 20px;">
-        <li style="margin-bottom: 8px;">Open the <strong>Kindred</strong> app.</li>
+        <li style="margin-bottom: 8px;">Open the <strong>Kokohor circle</strong> app.</li>
         <li style="margin-bottom: 8px;">Go to <strong>Join Family</strong>.</li>
         <li>Paste the code shown above.</li>
       </ol>
@@ -40,14 +39,14 @@ const sendInviteEmail = async ({ to, familyName, inviterName, inviteCode }) => {
     <hr style="border: none; border-top: 1px solid #E2E8F0; margin: 32px 0;" />
 
     <p style="color: #94A3B8; font-size: 12px; text-align: center;">
-      If you don't have an account, download Kindred and sign up using this email address.
+      If you don't have an account, download Kokohor circle and sign up using this email address.
     </p>
   </div>
   `;
 
   try {
     const info = await transporter.sendMail({
-      from: `"Kindred" <${process.env.MAIL_USER}>`,
+      from: `"Kokohor circle" <${process.env.MAIL_USER}>`,
       to,
       subject: `👋 ${inviterName} invited you to ${familyName}`,
       html,

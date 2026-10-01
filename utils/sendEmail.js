@@ -17,9 +17,9 @@ const getOtpEmailTemplate = (otp, purpose = "verification") => {
   const message =
     purpose === "reset"
       ? "We received a request to reset your password. Use the secure code below to proceed."
-      : "Welcome to Kindred! Please use the verification code below to complete your sign-up.";
+      : "Welcome to Kokohor Circle! Please use the verification code below to complete your sign-up.";
 
-  const brandColor = "#EAB308"; // Kindred Gold
+  const brandColor = "#EAB308"; 
 
   return `
 <!DOCTYPE html>
@@ -48,7 +48,7 @@ const getOtpEmailTemplate = (otp, purpose = "verification") => {
     <table class="main">
       <tr>
         <td class="header">
-          <h1>Kindred</h1>
+          <h1>Kokohor Circle</h1>
         </td>
       </tr>
       <tr>
@@ -66,8 +66,8 @@ const getOtpEmailTemplate = (otp, purpose = "verification") => {
       </tr>
       <tr>
         <td class="footer">
-          <p>&copy; 2026 Kindred Inc. <br> Built for families, by families.</p>
-          <p><a href="https://kindred.app">Visit our website</a> | <a href="#">Support</a></p>
+          <p>&copy; 2026 Kokohor Circle Inc. <br> Built for families, by families.</p>
+          <p><a href="https://Kokohor Circle.app">Visit our website</a> | <a href="#">Support</a></p>
         </td>
       </tr>
     </table>
@@ -93,7 +93,7 @@ const sendEmail = async (to, subject, text, purpose = "verification") => {
     : `<div style="font-family:sans-serif; padding:20px; color:#333; line-height:1.6;">${text}</div>`;
 
   const mailOptions = {
-    from: `"Kindred" <${process.env.MAIL_USER}>`,
+    from: `"Kokohor Circle" <${process.env.MAIL_USER}>`,
     to,
     subject: `✨ ${subject}`,
     text, // Fallback for Apple Watch/very old clients
