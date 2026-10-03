@@ -29,7 +29,6 @@ const padimanRouteUserSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
-
   isDriverApproved: {
     type: Boolean,
     default: false,
@@ -43,6 +42,19 @@ const padimanRouteUserSchema = new mongoose.Schema({
     default: false,
   },
   isDriverRejected: {
+    type: Boolean,
+    default: false,
+  },
+  // --- Address Verification Boolean Flags ---
+  isAddressVerified: {
+    type: Boolean,
+    default: false,
+  },
+  isAddressPending: {
+    type: Boolean,
+    default: false,
+  },
+  isAddressVerificationFailed: {
     type: Boolean,
     default: false,
   },
@@ -62,7 +74,7 @@ const padimanRouteUserSchema = new mongoose.Schema({
   driverLicenseNumber: {
     type: String,
     trim: true,
-    sparse: true, // Allows null/undefined for non-drivers
+    sparse: true,
   },
   ninNumber: {
     type: String,
@@ -92,8 +104,34 @@ const padimanRouteUserSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
-  // Verification metadata supporting vehicle applications and structured document statuses
   verificationMeta: {
+    utilityBill: {
+      billUrl: {
+        type: String,
+        default: null,
+      },
+      status: {
+        type: String,
+        enum: ["none", "pending", "approved", "rejected"],
+        default: "none",
+      },
+      address: {
+        type: String,
+        default: null,
+      },
+      rejectionReason: {
+        type: String,
+        default: null,
+      },
+      submittedAt: {
+        type: Date,
+        default: null,
+      },
+      verifiedAt: {
+        type: Date,
+        default: null,
+      },
+    },
     vehicleApplication: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
@@ -126,10 +164,8 @@ padimanRouteUserSchema.pre("save", async function () {
   this.password = await bcrypt.hash(this.password, salt);
 });
 
-// Method to compare passwords during login authentication
-padimanRouteUserSchema.methods.comparePassword = async function (
-  candidatePassword
-) {
+// Method to compare passwords during login
+padimanRouteUserSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 

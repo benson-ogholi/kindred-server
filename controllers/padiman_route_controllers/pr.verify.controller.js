@@ -16,8 +16,6 @@ const DOJAH_APP_ID = process.env.DOJAH_APP_ID || "";
 exports.submitDriverApplication = async (req, res) => {
   console.log("-----------------------------------------");
   console.log("📥 POST /api/v1/padiman_route/driver/apply hit");
-  console.log("📦 Request Body Fields:", Object.keys(req.body));
-  console.log("📁 Request Files:", req.files ? Object.keys(req.files) : "None");
 
   try {
     const userId =
@@ -32,13 +30,10 @@ exports.submitDriverApplication = async (req, res) => {
       plateNumber,
       vehicleType,
       address,
-      idType, // "bvn" or "nin"
+      idType,
       idNumber,
-      firstName,
-      lastName,
     } = req.body;
 
-    // ---------- Basic validation ----------
     if (!userId) {
       return res.status(400).json({ error: "User ID is required" });
     }
@@ -53,7 +48,7 @@ exports.submitDriverApplication = async (req, res) => {
     ) {
       return res.status(400).json({
         error:
-          "driverLicenseNumber, vehicleModel, plateNumber, vehicleType, idType and idNumber are required",
+          "driverLicenseNumber, vehicleModel, plateNumber, vehicleType, idType, and idNumber are required",
       });
     }
 
@@ -62,7 +57,6 @@ exports.submitDriverApplication = async (req, res) => {
       return res.status(404).json({ error: "PadimanRoute user not found" });
     }
 
-    // ---------- File handling ----------
     let licenseDocumentUrl = null;
     let selfieUrl = null;
     let selfieBase64 = null;
@@ -88,7 +82,6 @@ exports.submitDriverApplication = async (req, res) => {
       }
     }
 
-    // Fallback if selfie came as base64 string in body
     if (!selfieBase64 && req.body.selfieImage) {
       selfieBase64 = req.body.selfieImage.replace(
         /^data:image\/[a-z]+;base64,/,
@@ -102,7 +95,6 @@ exports.submitDriverApplication = async (req, res) => {
       });
     }
 
-    // ---------- Dojah KYC (BVN or NIN + Selfie) ----------
     const normalizedIdType = idType.toLowerCase().trim();
     if (normalizedIdType !== "bvn" && normalizedIdType !== "nin") {
       return res
@@ -115,8 +107,6 @@ exports.submitDriverApplication = async (req, res) => {
       [normalizedIdType]: idNumber,
       selfie_image: selfieBase64,
     };
-
-    console.log(`🚀 Calling Dojah ${normalizedIdType.toUpperCase()} Verify...`);
 
     let dojahResponse;
     try {
@@ -133,7 +123,6 @@ exports.submitDriverApplication = async (req, res) => {
         dojahErr.response?.data || dojahErr.message
       );
 
-      // Mark as rejected
       await PadimanRouteUser.findByIdAndUpdate(userId, {
         isDriverApproved: false,
         isDriverRejected: true,
@@ -164,12 +153,9 @@ exports.submitDriverApplication = async (req, res) => {
       });
     }
 
-    // ---------- Selfie match check ----------
     const selfieVerification = entityData.selfie_verification || {};
     const confidence = selfieVerification.confidence_value || 0;
     const isMatch = selfieVerification.match === true;
-
-    console.log("🔍 Selfie Verification:", { match: isMatch, confidence });
 
     if (!isMatch || confidence < 70) {
       await PadimanRouteUser.findByIdAndUpdate(userId, {
@@ -186,69 +172,62 @@ exports.submitDriverApplication = async (req, res) => {
       });
     }
 
-    // ---------- Optional name soft-check ----------
     const recordFirstName = (
       entityData.firstname ||
       entityData.first_name ||
       ""
-    )
-      .trim()
-      .toLowerCase();
+    ).trim();
     const recordLastName = (
       entityData.surname ||
       entityData.last_name ||
       entityData.lastname ||
       ""
-    )
-      .trim()
-      .toLowerCase();
+    ).trim();
 
-    // ---------- SUCCESS → APPROVE IMMEDIATELY ----------
-    const updatedUser = await PadimanRouteUser.findByIdAndUpdate(
-      userId,
-      {
-        isDriver: true,
-        isDriverApproved: true,
-        isDriverRejected: false,
-        driverLicenseNumber,
-        ...(address && { address }),
-        verificationMeta: {
-          ...(existingUser.verificationMeta || {}),
-          driverVerification: {
-            idType: normalizedIdType,
-            idNumber,
-            verifiedAt: new Date(),
-            dojahRecord: {
-              firstName: recordFirstName,
-              lastName: recordLastName,
-              birthdate: entityData.birthdate,
-              gender: entityData.gender,
-              selfieMatch: isMatch,
-              confidenceValue: confidence,
-            },
-            documents: {
-              licenseDocumentUrl,
-              selfieUrl,
-            },
-            vehicleApplication: {
-              vehicleModel,
-              vehicleYear,
-              plateNumber,
-              vehicleType,
-              appliedAt: new Date(),
-            },
+    const updatePayload = {
+      isDriver: true,
+      isDriverApproved: true,
+      isDriverRejected: false,
+      driverLicenseNumber,
+      ...(address && { address }),
+      ...(selfieUrl && {
+        profileImage: selfieUrl,
+      }),
+      verificationMeta: {
+        ...(existingUser.verificationMeta || {}),
+        driverVerification: {
+          idType: normalizedIdType,
+          idNumber,
+          verifiedAt: new Date(),
+          dojahRecord: {
+            firstName: recordFirstName,
+            lastName: recordLastName,
+            birthdate: entityData.birthdate,
+            gender: entityData.gender,
+            selfieMatch: isMatch,
+            confidenceValue: confidence,
+          },
+          documents: {
+            licenseDocumentUrl,
+            selfieUrl,
+          },
+          vehicleApplication: {
+            vehicleModel,
+            vehicleYear,
+            plateNumber,
+            vehicleType,
+            appliedAt: new Date(),
           },
         },
       },
+    };
+
+    const updatedUser = await PadimanRouteUser.findByIdAndUpdate(
+      userId,
+      updatePayload,
       { new: true }
     );
 
-    console.log("🎉 Driver approved successfully:", {
-      id: updatedUser._id,
-      email: updatedUser.email,
-    });
-
-    // Notification (non-blocking)
     sendNotification(updatedUser._id || userId, {
       title: "Driver Application Approved ✅",
       body: "Congratulations! Your identity has been verified and you are now an approved driver.",
@@ -273,6 +252,7 @@ exports.submitDriverApplication = async (req, res) => {
         isDriverApproved: true,
         isDriverRejected: false,
         driverLicenseNumber: updatedUser.driverLicenseNumber,
+        profileImage: updatedUser.profileImage,
         vehicleModel,
         plateNumber,
         verifiedIdentity: {
@@ -285,7 +265,7 @@ exports.submitDriverApplication = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("🔥 Server Error in /apply:", error);
+    console.error("🔥 Server Error in submitDriverApplication:", error);
     return res.status(500).json({
       error: "Server error while processing driver application",
       status: "failed",
@@ -299,9 +279,6 @@ exports.submitDriverApplication = async (req, res) => {
  * @access  Private
  */
 exports.getDriverApplicationStatus = async (req, res) => {
-  console.log("-----------------------------------------");
-  console.log("📥 GET /api/v1/padiman_route/driver/application-status hit");
-
   try {
     const userId =
       typeof req.user === "string"
@@ -317,7 +294,6 @@ exports.getDriverApplicationStatus = async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // Only two possible states
     let currentStatus = "not_submitted";
     if (user.isDriverApproved) {
       currentStatus = "approved";
@@ -351,12 +327,6 @@ exports.getDriverApplicationStatus = async (req, res) => {
  * @access  Private
  */
 exports.verifyCustomerDocuments = async (req, res) => {
-  console.log("-----------------------------------------");
-  console.log(
-    "📥 POST /api/v1/padiman_route/customer/verify-documents hit (PRODUCTION)"
-  );
-  console.log("📦 Request Body:", req.body);
-
   try {
     const userId =
       typeof req.user === "string"
@@ -365,14 +335,10 @@ exports.verifyCustomerDocuments = async (req, res) => {
     const { bvnVerified, ninNumber, isUserDocumented } = req.body;
 
     if (!userId) {
-      console.log("❌ Validation Error: User ID is missing");
       return res.status(400).json({ error: "User ID is required" });
     }
 
     if (!ninNumber) {
-      console.log(
-        "❌ Validation Error: NIN number is required for verification"
-      );
       return res
         .status(400)
         .json({ error: "NIN number is required to proceed with verification" });
@@ -380,17 +346,8 @@ exports.verifyCustomerDocuments = async (req, res) => {
 
     const existingUser = await PadimanRouteUser.findById(userId);
     if (!existingUser) {
-      console.log(
-        "❌ Database Error: PadimanRoute user not found with ID:",
-        userId
-      );
       return res.status(404).json({ error: "PadimanRoute user not found" });
     }
-
-    // MANDATORY DOJAH PRODUCTION API VERIFICATION HIT
-    console.log(
-      `🔍 Hitting Dojah PRODUCTION API for NIN verification: ${ninNumber}`
-    );
 
     const dojahUrl = `https://api.dojah.io/api/v1/kyc/nin?nin=${encodeURIComponent(
       ninNumber
@@ -405,14 +362,8 @@ exports.verifyCustomerDocuments = async (req, res) => {
     });
 
     const dojahResult = await dojahResponse.json();
-    console.log(
-      "📦 Dojah Production API Response Status:",
-      dojahResponse.status
-    );
 
-    // Strict evaluation: Must hit Dojah production and receive entity data to proceed
     if (!dojahResponse.ok || !dojahResult?.entity) {
-      console.log("❌ Dojah Production Verification Failed:", dojahResult);
       return res.status(400).json({
         error:
           "NIN verification failed via Dojah. Please check the NIN number and try again.",
@@ -425,7 +376,6 @@ exports.verifyCustomerDocuments = async (req, res) => {
 
     const dojahEntityData = dojahResult.entity;
 
-    // --- AGE VALIDATION (MUST BE 18 OR OLDER) ---
     if (dojahEntityData.date_of_birth) {
       const dob = new Date(dojahEntityData.date_of_birth);
       const today = new Date();
@@ -439,20 +389,10 @@ exports.verifyCustomerDocuments = async (req, res) => {
         age--;
       }
 
-      console.log(`🎂 Calculated User Age: ${age} years old`);
-
       if (age < 18) {
-        console.log(
-          `❌ Underage User Detected (${age} years old). Account scheduled for deletion in 20 seconds.`
-        );
-
-        // Schedule background deletion after 20 seconds (20,000 ms)
         setTimeout(async () => {
           try {
             await PadimanRouteUser.findByIdAndDelete(userId);
-            console.log(
-              `🗑️ Account successfully deleted for underage user: ${userId}`
-            );
           } catch (deleteErr) {
             console.error("🔥 Error deleting underage account:", deleteErr);
           }
@@ -467,7 +407,6 @@ exports.verifyCustomerDocuments = async (req, res) => {
       }
     }
 
-    // --- NAME MATCHING VALIDATION ---
     const userFullName = (existingUser.fullName || "").toLowerCase().trim();
     const dojahFirstName = (dojahEntityData.first_name || "")
       .toLowerCase()
@@ -479,21 +418,8 @@ exports.verifyCustomerDocuments = async (req, res) => {
       .toLowerCase()
       .trim();
 
-    console.log(
-      "🔍 Comparing Names - User FullName:",
-      userFullName,
-      "| Dojah Record:",
-      {
-        firstName: dojahFirstName,
-        middleName: dojahMiddleName,
-        lastName: dojahLastName,
-      }
-    );
-
-    // Split user full name into component tokens
     const userTokens = userFullName.split(/\s+/).filter(Boolean);
 
-    // Count how many parts of the user's name match Dojah's entity record fields
     let matchCount = 0;
     userTokens.forEach((token) => {
       if (
@@ -505,14 +431,10 @@ exports.verifyCustomerDocuments = async (req, res) => {
       }
     });
 
-    // Require at least 2 name components to match (or 1 if user only has a 1-word name registered)
     const requiredMatches =
       userTokens.length === 1 ? 1 : Math.min(2, userTokens.length);
 
     if (matchCount < requiredMatches) {
-      console.log(
-        `❌ Name Mismatch Error: User profile name '${existingUser.fullName}' does not match Dojah NIN record name.`
-      );
       return res.status(400).json({
         error:
           "Verification failed: The name on your NIN does not match your registered account name.",
@@ -522,8 +444,6 @@ exports.verifyCustomerDocuments = async (req, res) => {
         } ${dojahEntityData.last_name || ""}`.trim(),
       });
     }
-
-    console.log("✅ Name Validation Passed successfully.");
 
     const isNinSuccessfullyVerified = true;
 
@@ -548,7 +468,6 @@ exports.verifyCustomerDocuments = async (req, res) => {
           ninStatus: ninStatusText,
           verifiedAt: new Date(),
         },
-        // Store Dojah entity response object inside verificationMeta
         dojahEntity: dojahEntityData,
       },
     };
@@ -557,16 +476,6 @@ exports.verifyCustomerDocuments = async (req, res) => {
       userId,
       updateFields,
       { new: true }
-    );
-
-    console.log(
-      "🎉 Customer Documents Verified Successfully via Dojah Production for User:",
-      {
-        id: updatedUser._id,
-        email: updatedUser.email,
-        isUserDocumented: updatedUser.isUserDocumented,
-        ninNumber: updatedUser.ninNumber,
-      }
     );
 
     return res.status(200).json({
@@ -590,8 +499,134 @@ exports.verifyCustomerDocuments = async (req, res) => {
  * @access  Private
  */
 exports.getCustomerVerificationStatus = async (req, res) => {
+  try {
+    const userId =
+      typeof req.user === "string"
+        ? req.user
+        : req.user?.id || req.user?._id || req.query.userId;
+
+    if (!userId) {
+      return res.status(400).json({ error: "User ID is required" });
+    }
+
+    const user = await PadimanRouteUser.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    return res.status(200).json({
+      message: "Customer verification status fetched successfully",
+      isUserDocumented: user.isUserDocumented || false,
+      ninNumber: user.ninNumber || null,
+      verifiedDocuments: user.verificationMeta?.verifiedDocuments || {
+        bvnStatus: "BVN number not verified",
+        ninStatus: "NIN number not verified",
+      },
+    });
+  } catch (error) {
+    console.error("🔥 Server Error in /customer/verification-status:", error);
+    return res.status(500).json({
+      error: "Server error while fetching customer verification status",
+    });
+  }
+};
+
+/**
+ * @desc    Manually upload utility bill to verify user address
+ * @route   POST /api/v1/padiman_route/customer/upload-utility-bill
+ * @access  Private
+ */
+exports.uploadUtilityBill = async (req, res) => {
   console.log("-----------------------------------------");
-  console.log("📥 GET /api/v1/padiman_route/customer/verification-status hit");
+  console.log("📥 POST /api/v1/padiman_route/customer/upload-utility-bill hit");
+
+  try {
+    const userId =
+      typeof req.user === "string"
+        ? req.user
+        : req.user?.id || req.user?._id || req.body.userId;
+
+    const { address, billUrl: bodyBillUrl } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: "User ID is required" });
+    }
+
+    if (!address) {
+      return res.status(400).json({ error: "Residential address is required" });
+    }
+
+    const user = await PadimanRouteUser.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: "PadimanRoute user not found" });
+    }
+
+    let uploadedBillUrl = bodyBillUrl || null;
+
+    if (req.files?.utilityBill?.[0] || req.file) {
+      const file = req.files?.utilityBill?.[0] || req.file;
+      uploadedBillUrl = await uploadToBackblaze(
+        file.buffer,
+        file.originalname || `utility_bill_${userId}.jpg`,
+        "utility-bills"
+      );
+    }
+
+    if (!uploadedBillUrl) {
+      return res.status(400).json({
+        error: "Utility bill image document is required for verification",
+      });
+    }
+
+    const currentMeta = user.verificationMeta || {};
+
+    const updatedUser = await PadimanRouteUser.findByIdAndUpdate(
+      userId,
+      {
+        address: address,
+        isAddressVerified: false,
+        isAddressPending: true,
+        isAddressVerificationFailed: false,
+        verificationMeta: {
+          ...currentMeta,
+          utilityBill: {
+            billUrl: uploadedBillUrl,
+            status: "pending",
+            address: address,
+            rejectionReason: null,
+            submittedAt: new Date(),
+            verifiedAt: null,
+          },
+        },
+      },
+      { new: true }
+    );
+
+    return res.status(200).json({
+      message: "Utility bill uploaded and submitted for manual review",
+      status: "pending",
+      address: updatedUser.address,
+      isAddressVerified: false,
+      isAddressPending: true,
+      isAddressVerificationFailed: false,
+      utilityBill: updatedUser.verificationMeta.utilityBill,
+    });
+  } catch (error) {
+    console.error("🔥 Server Error in uploadUtilityBill:", error);
+    return res.status(500).json({
+      error: "Server error while processing utility bill upload",
+    });
+  }
+};
+
+/**
+ * @desc    Get current user's current address & address verification state
+ * @route   GET /api/v1/padiman_route/customer/current-address
+ * @access  Private
+ */
+exports.getCurrentAddress = async (req, res) => {
+  console.log("-----------------------------------------");
+  console.log("📥 GET /api/v1/padiman_route/customer/current-address hit");
 
   try {
     const userId =
@@ -608,43 +643,45 @@ exports.getCustomerVerificationStatus = async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // Check if test mode is requested to clear all verification records
-    const isTestMode = false;
+    const utilityBillData = user.verificationMeta?.utilityBill || {
+      billUrl: null,
+      status: "none",
+      address: user.address || null,
+      rejectionReason: null,
+      submittedAt: null,
+      verifiedAt: null,
+    };
 
-    if (isTestMode) {
-      console.log(
-        `⚠️ Test mode active: Clearing verification records for user ${userId}`
-      );
+    const isAddressVerified =
+      user.isAddressVerified !== undefined
+        ? user.isAddressVerified
+        : utilityBillData.status === "approved";
 
-      user.isUserDocumented = false;
-      user.ninNumber = null;
-      user.bvnVerified = false;
-      user.verificationMeta = {
-        verifiedDocuments: {
-          bvnStatus: "BVN number not verified",
-          ninStatus: "NIN number not verified",
-        },
-      };
+    const isAddressPending =
+      user.isAddressPending !== undefined
+        ? user.isAddressPending
+        : utilityBillData.status === "pending";
 
-      await user.save();
-    }
+    const isAddressVerificationFailed =
+      user.isAddressVerificationFailed !== undefined
+        ? user.isAddressVerificationFailed
+        : utilityBillData.status === "rejected";
 
     return res.status(200).json({
-      message: isTestMode
-        ? "Test mode: All verification records cleared successfully"
-        : "Customer verification status fetched successfully",
-      isUserDocumented: user.isUserDocumented || false,
-      ninNumber: user.ninNumber || null,
-      verifiedDocuments: user.verificationMeta?.verifiedDocuments || {
-        bvnStatus: "BVN number not verified",
-        ninStatus: "NIN number not verified",
-      },
+      message: "Current user address details fetched successfully",
+      address: user.address || utilityBillData.address || null,
+      fullName: user.fullName,
+      email: user.email,
+      phone: user.phone,
+      isAddressVerified,
+      isAddressPending,
+      isAddressVerificationFailed,
+      utilityBill: utilityBillData,
     });
   } catch (error) {
-    console.error("🔥 Server Error in /customer/verification-status:", error);
+    console.error("🔥 Server Error in getCurrentAddress:", error);
     return res.status(500).json({
-      error: "Server error while fetching customer verification status",
+      error: "Server error while fetching address details",
     });
   }
 };
-

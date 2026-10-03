@@ -9,11 +9,30 @@ const { generatePickupCode } = require("../../utils/generatePickupCode");
 
 // GET PROFILE
 const getProfile = async (req, res) => {
-  const user = await Padiman_Route_User.findById(req.user).select("-password");
-  if (user) {
+  try {
+    const user = await Padiman_Route_User.findById(req.user).select(
+      "-password"
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // If the user is an approved driver, ensure their profileImage uses their driver verification selfie
+    if (user.isDriverApproved) {
+      const driverSelfie =
+        user.verificationMeta?.driverVerification?.documents?.selfieUrl;
+
+      if (driverSelfie && user.profileImage !== driverSelfie) {
+        user.profileImage = driverSelfie;
+        await user.save();
+      }
+    }
+
     res.json(user);
-  } else {
-    res.status(404).json({ message: "User not found" });
+  } catch (error) {
+    console.error("Get Profile Error:", error);
+    res.status(500).json({ message: "Server error fetching profile" });
   }
 };
 
@@ -83,7 +102,6 @@ const saveExpoPushToken = async (req, res) => {
 };
 
 // GET ALL USER ORDERS, LIFECYCLES, AND ONGOING COUNTS
-// GET ALL USER ORDERS, LIFECYCLES, AND ONGOING COUNTS
 const getUserDashboardOrders = async (req, res) => {
   console.log(
     `📊 [DASHBOARD METRICS] Gathering all activity lanes for User: ${req.user}`
@@ -104,14 +122,12 @@ const getUserDashboardOrders = async (req, res) => {
         .populate("driver")
         .sort({ createdAt: -1 }),
 
-      // send_parcel: If "Parcel" represents packages a user created to be sent:
-      // This fetches ALL details of the parcel and the complete user object
+      // send_parcel: Packages a user created to be sent
       Parcel.find({ requestedBy: userId })
         .populate("requestedBy")
         .sort({ createdAt: -1 }),
 
-      // deliver_parcel: If you have a separate schema/flag for parcels the user is *delivering*
-      // (Leaving your original query fallback intact here just in case)
+      // deliver_parcel
       ParcelRequest.find({ user: userId })
         .populate("user")
         .sort({ createdAt: -1 }),
@@ -125,8 +141,8 @@ const getUserDashboardOrders = async (req, res) => {
 
     // 2. Map and Categorize Arrays into the 4 target lanes
     const offer_ride = postedRides;
-    const send_parcel = requestedParcels; // This now contains full Parcel details + full User profile
-    const deliver_parcel = deliveryParalel;
+    const send_parcel = requestedParcels;
+    const deliver_parcel = deliveryParcels;
 
     // Filter negotiations explicitly to isolate passengers joining a ride
     const join_ride = customerNegotiations.filter(
@@ -184,7 +200,7 @@ const getUserDashboardOrders = async (req, res) => {
       orders: {
         offer_ride,
         deliver_parcel,
-        send_parcel, // Sends back the entire array of full details
+        send_parcel,
         join_ride,
       },
     });
@@ -196,21 +212,31 @@ const getUserDashboardOrders = async (req, res) => {
     });
   }
 };
+
 // ====================== PROFILE PICTURE UPLOAD ONLY ======================
 const updateProfilePicture = async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: "No image file uploaded",
-      });
-    }
-
     const user = await Padiman_Route_User.findById(req.user);
     if (!user) {
       return res
         .status(404)
         .json({ success: false, message: "User not found" });
+    }
+
+    // Block updating profile picture if driver is approved
+    if (user.isDriverApproved || user.isDriver) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Approved drivers cannot update their profile picture. Your photo is synchronized with your verified identity photo.",
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "No image file uploaded",
+      });
     }
 
     console.log(`📸 Uploading new profile picture for user: ${user._id}`);
@@ -299,7 +325,6 @@ const getUserAllRequests = async (req, res) => {
     for (const j of joinRides) await expireIfNeeded(j, JoinRide);
     for (const pr of parcelRequests) await expireIfNeeded(pr, ParcelRequest);
     for (const ro of rideOffers) await expireIfNeeded(ro, RideOffer);
-    // =====================================================================
 
     // 2. Collect all possible service IDs (safe check)
     const allServiceIds = [
@@ -544,7 +569,7 @@ const getRequestById = async (req, res) => {
       );
     }
 
-    // 5. Convert document to plain object so it behaves cleanly during mutations and serialization
+    // 5. Convert document to plain object
     const plainData = requestData.toObject();
 
     // Format dates before sending response
@@ -564,8 +589,6 @@ const getRequestById = async (req, res) => {
 };
 
 // ====================== DATE FORMATTER ======================
-// ====================== DATE FORMATTER (Fixed) ======================
-// ====================== DATE FORMATTER (DEBUG + FIXED) ======================
 const formatRequestDates = (obj) => {
   if (!obj) return obj;
 
@@ -574,12 +597,6 @@ const formatRequestDates = (obj) => {
   const formatDate = (dateInput, fieldName = "") => {
     if (!dateInput) return null;
 
-    console.log(
-      `[DATE DEBUG] Field: ${fieldName} | Raw Input:`,
-      dateInput,
-      `| Type: ${typeof dateInput}`
-    );
-
     let d;
 
     if (dateInput instanceof Date) {
@@ -587,23 +604,16 @@ const formatRequestDates = (obj) => {
     } else if (typeof dateInput === "string") {
       d = new Date(dateInput);
 
-      // Fallback attempts
       if (isNaN(d.getTime())) {
-        console.log(
-          `[DATE DEBUG] First parse failed for: ${dateInput} → Trying fallback...`
-        );
-
         let cleaned = dateInput.trim();
-
-        // Common fixes
-        cleaned = cleaned.replace(" ", "T"); // "2025-03-24 02:35" → "2025-03-24T02:35"
-        cleaned = cleaned.replace(/\.000Z?$/, ""); // Remove .000Z sometimes
-        cleaned = cleaned.split("+")[0]; // Remove timezone offset
+        cleaned = cleaned.replace(" ", "T");
+        cleaned = cleaned.replace(/\.000Z?$/, "");
+        cleaned = cleaned.split("+")[0];
 
         d = new Date(cleaned);
       }
     } else if (typeof dateInput === "number") {
-      d = new Date(dateInput); // timestamp
+      d = new Date(dateInput);
     } else {
       d = new Date(dateInput);
     }
@@ -613,10 +623,9 @@ const formatRequestDates = (obj) => {
         `[DATE ERROR] Invalid date for field "${fieldName}":`,
         dateInput
       );
-      return dateInput; // Return original so frontend doesn't break
+      return dateInput;
     }
 
-    // Successful formatting
     const dayName = d.toLocaleDateString("en-US", { weekday: "long" });
     const monthName = d.toLocaleDateString("en-US", { month: "long" });
     const year = d.getFullYear();
@@ -641,15 +650,11 @@ const formatRequestDates = (obj) => {
       }
     };
 
-    const formatted = `${dayName} ${hours}:${minutes}${ampm} ${day}${ordinal(
+    return `${dayName} ${hours}:${minutes}${ampm} ${day}${ordinal(
       day
     )} ${monthName} ${year}`;
-    console.log(`[DATE SUCCESS] ${fieldName} → ${formatted}`);
-
-    return formatted;
   };
 
-  // Format top-level fields
   const dateFields = [
     "createdAt",
     "updatedAt",
@@ -672,10 +677,8 @@ const formatRequestDates = (obj) => {
     }
   });
 
-  // Negotiations
   if (data.negotiations && Array.isArray(data.negotiations)) {
     data.negotiations = data.negotiations.map((neg, index) => {
-      console.log(`[DATE DEBUG] Processing negotiation #${index}`);
       if (neg.createdAt)
         neg.createdAt = formatDate(
           neg.createdAt,
@@ -692,7 +695,6 @@ const formatRequestDates = (obj) => {
     });
   }
 
-  // Nested route object
   if (data.route && typeof data.route === "object") {
     Object.keys(data.route).forEach((key) => {
       if (/date|time/i.test(key) && data.route[key]) {
@@ -704,7 +706,6 @@ const formatRequestDates = (obj) => {
   return data;
 };
 
-// ====================== APP UPDATES / VERSIONING ======================
 // ====================== APP UPDATES / VERSIONING ======================
 const getAppUpdates = async (req, res) => {
   try {
@@ -722,7 +723,6 @@ const getAppUpdates = async (req, res) => {
 • Bug fixes and performance improvements
       `.trim(),
       releaseDate: "June 16, 2026",
-      // Updated: Split into platform-specific links
       links: {
         android:
           "https://play.google.com/store/apps/details?id=com.padimanroute",
@@ -751,8 +751,9 @@ module.exports = {
   logout,
   saveExpoPushToken,
   updateProfilePicture,
-  getUserDashboardOrders, // Exported to your route tree configuration files
+  getUserDashboardOrders,
   getUserAllRequests,
   getRequestById,
   getAppUpdates,
 };
+

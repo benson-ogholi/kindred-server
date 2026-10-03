@@ -6,6 +6,8 @@ const {
   getDriverApplicationStatus,
   verifyCustomerDocuments,
   getCustomerVerificationStatus,
+  uploadUtilityBill,
+  getCurrentAddress,
 } = require("../../controllers/padiman_route_controllers/pr.verify.controller");
 const { protect } = require("../../middlewares/pr/pr.authMiddleware");
 
@@ -38,6 +40,19 @@ router.get(
   "/customer/verification-status",
   protect,
   getCustomerVerificationStatus
+);
+
+// Customer Address & Utility Bill Verification Routes
+router.post(
+  "/customer/upload-utility-bill",
+  protect,
+  upload.single("utilityBill"),
+  uploadUtilityBill
+);
+router.get(
+  "/customer/current-address",
+  protect,
+  getCurrentAddress
 );
 
 module.exports = router;
