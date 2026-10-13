@@ -36,9 +36,7 @@ const hasFamilyAccess = (family, userId) => {
   );
 };
 
-// ---------------------------------------------------------
-// 1️⃣ CREATE SAFETY NET
-// ---------------------------------------------------------
+
 router.post(
   "/:familyId",
   protect,
@@ -50,15 +48,8 @@ router.post(
   async (req, res) => {
     try {
       const { familyId } = req.params;
-      const { title, description, triggerDate, assignedUsers } = req.body;
-
-      console.warn(
-        title,
-        description,
-        triggerDate,
-        assignedUsers,
-        "assignedUsers"
-      );
+      const { title, description, triggerDate, assignedUsers, isEditable } =
+        req.body;
 
       const family = await Family.findById(familyId);
       if (
@@ -96,15 +87,69 @@ router.post(
         videoUrls,
         assignedUsers: assignedUsers ? JSON.parse(assignedUsers) : [],
         triggerDate,
+        isEditable: isEditable !== undefined ? JSON.parse(isEditable) : true,
       });
 
-      console.log(safetyNet, "safetyNet");
       res.status(201).json({ message: "Safety Net created", safetyNet });
     } catch (error) {
       res.status(500).json({ message: error.message });
     }
   }
 );
+
+router.put("/:id", protect, async (req, res) => {
+  try {
+    const net = await SafetyNet.findById(req.params.id);
+    if (!net) return res.status(404).json({ message: "Safety net not found" });
+
+    const isOwner = net.createdBy.toString() === req.user._id.toString();
+    if (!isOwner) {
+      return res
+        .status(403)
+        .json({ message: "Only the creator can edit this" });
+    }
+
+    // CHECK: Is it allowed to be edited?
+    if (net.isEditable === false) {
+      return res
+        .status(400)
+        .json({
+          message:
+            "This vault was set to Non-Editable and can no longer be changed.",
+        });
+    }
+
+    // CHECK: Has it already been triggered/released?
+    if (new Date(net.triggerDate) <= new Date()) {
+      return res
+        .status(400)
+        .json({
+          message:
+            "Cannot edit this vault because its trigger time has passed.",
+        });
+    }
+
+    let updateFields = { ...req.body };
+    if (typeof updateFields.assignedUsers === "string") {
+      try {
+        updateFields.assignedUsers = JSON.parse(updateFields.assignedUsers);
+      } catch (e) {}
+    }
+
+    const updatedNet = await SafetyNet.findByIdAndUpdate(
+      req.params.id,
+      { $set: updateFields },
+      { new: true, runValidators: true }
+    );
+
+    res.status(200).json({
+      message: "Updated successfully",
+      safetyNet: updatedNet,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Update failed", error: error.message });
+  }
+});
 
 // ---------------------------------------------------------
 // 2️⃣ GET ALL SAFETY NETS FOR A FAMILY
@@ -192,70 +237,7 @@ router.get("/:id", protect, async (req, res) => {
 // ---------------------------------------------------------
 // 3️⃣ UPDATE SAFETY NET
 // ---------------------------------------------------------
-router.put("/:id", protect, async (req, res) => {
-  console.log("🚀 [UPDATE START] Safety Net ID:", req.params.id);
-  console.log("👤 [USER] Requesting User ID:", req.user?._id);
-  console.log("📦 [PAYLOAD] req.body:", JSON.stringify(req.body, null, 2));
 
-  try {
-    const net = await SafetyNet.findById(req.params.id);
-
-    if (!net) {
-      console.error("❌ [NOT FOUND] No SafetyNet exists with this ID.");
-      return res.status(404).json({ message: "Safety net not found" });
-    }
-
-    console.log(
-      "🔍 [DATABASE] Existing record found. CreatedBy:",
-      net.createdBy
-    );
-
-    const isOwner = net.createdBy.toString() === req.user._id.toString();
-    console.log(
-      `⚖️ [AUTH CHECK] Match? ${isOwner} (Creator: ${net.createdBy} vs User: ${req.user._id})`
-    );
-
-    if (!isOwner) {
-      console.warn("🚫 [FORBIDDEN] Unauthorized attempt to edit.");
-      return res
-        .status(403)
-        .json({ message: "Only the creator can edit this" });
-    }
-
-    let updateFields = { ...req.body };
-
-    if (typeof updateFields.assignedUsers === "string") {
-      try {
-        updateFields.assignedUsers = JSON.parse(updateFields.assignedUsers);
-        console.log("📎 [PARSED] assignedUsers converted to Array.");
-      } catch (e) {
-        console.warn("⚠️ [PARSE ERROR] assignedUsers remains a string.");
-      }
-    }
-
-    console.log("📝 [SAVING] Applying updates to DB...");
-    const updatedNet = await SafetyNet.findByIdAndUpdate(
-      req.params.id,
-      { $set: updateFields },
-      { new: true, runValidators: true }
-    );
-
-    console.log(
-      "✅ [SUCCESS] Updated Record:",
-      JSON.stringify(updatedNet, null, 2)
-    );
-    console.log("✨ [FINAL DESCRIPTION]:", updatedNet.description);
-    console.log("--- UPDATE END ---");
-
-    res.status(200).json({
-      message: "Updated successfully",
-      safetyNet: updatedNet,
-    });
-  } catch (error) {
-    console.error("🔥 [CRITICAL ERROR] Update failed:", error.message);
-    res.status(500).json({ message: "Update failed", error: error.message });
-  }
-});
 
 // ---------------------------------------------------------
 // 4️⃣ DELETE SAFETY NET

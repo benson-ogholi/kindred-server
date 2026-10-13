@@ -18,9 +18,14 @@ const safetyNetSchema = new mongoose.Schema(
       required: [true, "Title is required"],
       trim: true,
     },
-    isRead: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Standardized
- 
-    // Media Arrays
+    isRead: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+
+    // NEW: Determines if the vault can be modified before it triggers
+    isEditable: {
+      type: Boolean,
+      default: true,
+    },
+
     imageUrls: [{ type: String }],
     audioUrls: [{ type: String }],
     videoUrls: [{ type: String }],
