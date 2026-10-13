@@ -1629,16 +1629,36 @@ io.on("connection", (socket) => {
       isTyping: false,
     });
   });
+  const RING_TIMEOUT_MS = 40000;
+  const ringTimers = new Map();
 
+  function emitCallEnded(roomId, info) {
+    // Also reach users who never joined the room (unanswered receiver)
+    const sids = [info?.callerId, info?.receiverId]
+      .filter(Boolean)
+      .map((id) => onlineUsers.get(id.toString()))
+      .filter(Boolean);
+    io.to([roomId, ...sids]).emit("call-ended", { roomId }); // socket.io dedupes
+  }
   // ---- Calls ----
   socket.on("kookohor-join-room", async (data) => {
     const roomId = typeof data === "object" ? data.roomId : data;
-    const callerId = data?.callerId ? data.callerId.toString() : undefined;
-    const receiverId = data?.receiverId
-      ? data.receiverId.toString()
-      : undefined;
-
+    const callerId = data?.callerId?.toString();
+    const receiverId = data?.receiverId?.toString();
     if (!roomId) return;
+
+    // Decide synchronously, BEFORE any await, so double-emits can't both be "first"
+    const isFirstJoin = !activeCalls.has(roomId);
+    if (isFirstJoin && callerId) {
+      activeCalls.set(roomId, {
+        answered: false,
+        startTime: Date.now(),
+        callerId,
+        receiverId: receiverId || "room-participant",
+        callerName: "Someone",
+      });
+    }
+
     socket.join(roomId);
     socket.roomId = roomId;
     socket.callerId = callerId;
@@ -1714,41 +1734,43 @@ io.on("connection", (socket) => {
 
         // ========== PUSH NOTIFICATION FOR INCOMING CALL ==========
         try {
-          await sendPushNotificationToUser(receiverId, {
-            title: "Incoming Call",
-            body: `${callerName} is calling you...`,
-            priority: "high",
-            channelId: "incoming_calls", // Android high-priority channel
-            sound: "ringtone",
+          const call = activeCalls.get(roomId);
+          if (call) call.callerName = callerName;
 
-            // Android specific payload configurations for heads-up full screen call overlay
-            android: {
-              channelId: "incoming_calls",
-              priority: "max",
-              importance: "max",
-              sound: "ringtone",
-              vibrate: [0, 500, 200, 500],
-              category: "call", // Tells Android OS this is an urgent phone/audio call
-              visibility: "public", // Ensures it shows up on locked screens
-              // fullScreenAction triggers the heads-up ringing display layout
-              fullScreenAction: {
-                id: "default",
-              },
-            },
+          // ONLY the first joiner (the caller) triggers ringing
+          if (isFirstJoin && receiverId) {
+            const callPayload = {
+              /* same as before */
+            };
 
-            // Unified data payload for your client app to handle routing and call keeping
-            data: {
-              type: "incoming_call",
-              router: "/call/audio-call",
+            const targetSocketId = onlineUsers.get(receiverId);
+            if (targetSocketId) {
+              io.to(targetSocketId).emit("incoming-call", callPayload);
+            }
+
+            await sendPushNotificationToUser(receiverId, {
+              /* same as before */
+            });
+
+            // Ring timeout -> missed call
+            ringTimers.set(
               roomId,
-              callerId,
-              receiverId,
-              callerName,
-              callerProfilePicture: callerUser?.profilePicture || "",
-              receiverName,
-              receiverProfilePicture: receiverUser?.profilePicture || "",
-              isCaller: "false",
-            },
+              setTimeout(async () => {
+                const c = activeCalls.get(roomId);
+                if (c && !c.answered) {
+                  ringTimers.delete(roomId);
+                  await finalizeCall(roomId); // mark as missed inside if you can
+                  emitCallEnded(roomId, c);
+                  sendPushNotificationToUser(receiverId, {
+                    data: { type: "call_cancelled", roomId },
+                  }).catch(() => {});
+                }
+              }, RING_TIMEOUT_MS)
+            );
+          }
+
+          socket.to(roomId).emit("kookohor-user-connected", {
+            /* same as before */
           });
 
           console.log(
@@ -1797,14 +1819,18 @@ io.on("connection", (socket) => {
     }
 
     const activeRoomId = roomId || socket.roomId;
-    if (activeRoomId && activeCalls.has(activeRoomId)) {
+    if (activeRoomId) {
+      // Answered -> cancel the 40s missed-call timeout
+      clearRingTimer(activeRoomId);
+
       const info = activeCalls.get(activeRoomId);
-      if (!info.answered) {
+      if (info && !info.answered) {
         info.answered = true;
         info.answerTime = Date.now();
       }
     }
   });
+  
   socket.on(
     "kookohor-ice-candidate",
     ({ candidate, roomId, targetSocketId }) => {
@@ -1838,16 +1864,22 @@ io.on("connection", (socket) => {
   socket.on("kookohor-end-call", async (data) => {
     const roomId = data?.roomId || socket.roomId;
     if (!roomId) return;
+    const info = activeCalls.get(roomId); // grab BEFORE finalizeCall removes it
+    clearTimeout(ringTimers.get(roomId));
+    ringTimers.delete(roomId);
+
     await finalizeCall(roomId);
-    io.to(roomId).emit("call-ended", { roomId });
+    emitCallEnded(roomId, info);
+
+    if (info?.receiverId && !info.answered) {
+      sendPushNotificationToUser(info.receiverId, {
+        data: { type: "call_cancelled", roomId },
+      }).catch(() => {});
+    }
 
     const room = io.sockets.adapter.rooms.get(roomId);
-    if (room) {
-      for (const sid of room) {
-        const s = io.sockets.sockets.get(sid);
-        if (s) s.leave(roomId);
-      }
-    }
+    if (room)
+      for (const sid of room) io.sockets.sockets.get(sid)?.leave(roomId);
   });
 
   // ---- Inbox / Calls list ----
