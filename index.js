@@ -1629,26 +1629,89 @@ io.on("connection", (socket) => {
       isTyping: false,
     });
   });
-  const RING_TIMEOUT_MS = 40000;
-  const ringTimers = new Map();
 
-  function emitCallEnded(roomId, info) {
-    // Also reach users who never joined the room (unanswered receiver)
-    const sids = [info?.callerId, info?.receiverId]
-      .filter(Boolean)
-      .map((id) => onlineUsers.get(id.toString()))
-      .filter(Boolean);
-    io.to([roomId, ...sids]).emit("call-ended", { roomId }); // socket.io dedupes
+  // ============================================================================
+  // PART 1 — put these helpers at the TOP LEVEL of your server file
+  //          (next to `activeCalls`, `onlineUsers`, `finalizeCall`)
+  // ============================================================================
+
+  const RING_TIMEOUT_MS = 40_000;
+  const ringTimers = new Map(); // roomId -> Timeout
+
+  function clearRingTimer(roomId) {
+    const t = ringTimers.get(roomId);
+    if (t) clearTimeout(t);
+    ringTimers.delete(roomId);
   }
+
+  const displayName = (u) =>
+    u
+      ? `${u.firstName || ""} ${u.lastName || ""}`.trim() ||
+        u.fullName ||
+        "Someone"
+      : "Someone";
+
+  /**
+   * Tell everyone the call is over. Reaches the room AND each user's personal
+   * socket, because a receiver who never answered is NOT in the room.
+   * (This was the cause of the "stuck ringing" missed call.)
+   */
+  function emitCallEnded(roomId, info) {
+    const targets = new Set([roomId]);
+    [info?.callerId, info?.receiverId].forEach((id) => {
+      if (!id) return;
+      const sid = onlineUsers.get(id.toString());
+      if (sid) targets.add(sid);
+    });
+    io.to([...targets]).emit("call-ended", { roomId }); // socket.io dedupes sockets
+  }
+
+  /** Data-only "stop ringing" push, for receivers whose app is in background/killed */
+  function sendCallCancelledPush(receiverId, roomId) {
+    if (!receiverId || receiverId === "room-participant") return;
+    sendPushNotificationToUser(receiverId, {
+      priority: "high",
+      ttl: 60,
+      data: { type: "call_cancelled", roomId, sentAt: String(Date.now()) },
+    }).catch(() => {});
+  }
+
+  /** Single place that ends a call on the server */
+  async function endCallOnServer(roomId, fallbackInfo = {}) {
+    clearRingTimer(roomId);
+    const info = activeCalls.get(roomId) || fallbackInfo; // grab BEFORE finalizeCall removes it
+    const wasAnswered = !!activeCalls.get(roomId)?.answered;
+
+    await finalizeCall(roomId); // (mark as "missed" inside if !wasAnswered, if you can)
+    emitCallEnded(roomId, info);
+
+    if (!wasAnswered) sendCallCancelledPush(info.receiverId, roomId);
+
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (room) {
+      for (const sid of [...room]) io.sockets.sockets.get(sid)?.leave(roomId);
+    }
+  }
+
+  // ============================================================================
+  // PART 2 — replace your whole "---- Calls ----" block inside
+  //          io.on("connection", (socket) => { ... }) with this.
+  //          (Keep your existing "get_calls" handler below it untouched.)
+  // ============================================================================
+
   // ---- Calls ----
   socket.on("kookohor-join-room", async (data) => {
     const roomId = typeof data === "object" ? data.roomId : data;
     const callerId = data?.callerId?.toString();
     const receiverId = data?.receiverId?.toString();
+    const isCaller = data?.isCaller !== false && data?.isCaller !== "false";
     if (!roomId) return;
 
-    // Decide synchronously, BEFORE any await, so double-emits can't both be "first"
+    // Decide SYNCHRONOUSLY (before any await) so a double-emit can't ring twice.
+    // Only the very first join, made by the caller, is allowed to ring the receiver.
     const isFirstJoin = !activeCalls.has(roomId);
+    const shouldRing = isFirstJoin && isCaller && !!callerId && !!receiverId;
+
     if (isFirstJoin && callerId) {
       activeCalls.set(roomId, {
         answered: false,
@@ -1658,6 +1721,9 @@ io.on("connection", (socket) => {
         callerName: "Someone",
       });
     }
+
+    // Receiver joined => they accepted => stop the ring timeout
+    if (!isCaller) clearRingTimer(roomId);
 
     socket.join(roomId);
     socket.roomId = roomId;
@@ -1686,32 +1752,13 @@ io.on("connection", (socket) => {
           : null,
       ]);
 
-      const callerName = callerUser
-        ? `${callerUser.firstName || ""} ${callerUser.lastName || ""}`.trim() ||
-          callerUser.fullName ||
-          "Someone"
-        : "Someone";
+      const callerName = displayName(callerUser);
+      const receiverName = displayName(receiverUser);
 
-      const receiverName = receiverUser
-        ? `${receiverUser.firstName || ""} ${
-            receiverUser.lastName || ""
-          }`.trim() ||
-          receiverUser.fullName ||
-          "Someone"
-        : "Someone";
+      const call = activeCalls.get(roomId);
+      if (call) call.callerName = callerName;
 
-      if (roomId && callerId && !activeCalls.has(roomId)) {
-        activeCalls.set(roomId, {
-          answered: false,
-          startTime: Date.now(),
-          callerId,
-          receiverId: receiverId || "room-participant",
-          callerName,
-        });
-      }
-
-      if (receiverId) {
-        const targetSocketId = onlineUsers.get(receiverId.toString());
+      if (shouldRing) {
         const callPayload = {
           roomId,
           callerId,
@@ -1721,8 +1768,11 @@ io.on("connection", (socket) => {
           receiverName,
           receiverProfilePicture: receiverUser?.profilePicture || "",
           isCaller: false,
+          sentAt: Date.now(),
         };
 
+        // 1) Live socket (app open)
+        const targetSocketId = onlineUsers.get(receiverId);
         if (targetSocketId) {
           io.to(targetSocketId).emit("incoming-call", callPayload);
         } else {
@@ -1732,59 +1782,57 @@ io.on("connection", (socket) => {
           }
         }
 
-        // ========== PUSH NOTIFICATION FOR INCOMING CALL ==========
+        // 2) Push (app background/killed). DATA-ONLY on Android so the OS does
+        //    not draw its own notification on top of ours. `ttl` makes the push
+        //    expire, so a late delivery can't ring an old call.
         try {
-          const call = activeCalls.get(roomId);
-          if (call) call.callerName = callerName;
-
-          // ONLY the first joiner (the caller) triggers ringing
-          if (isFirstJoin && receiverId) {
-            const callPayload = {
-              /* same as before */
-            };
-
-            const targetSocketId = onlineUsers.get(receiverId);
-            if (targetSocketId) {
-              io.to(targetSocketId).emit("incoming-call", callPayload);
-            }
-
-            await sendPushNotificationToUser(receiverId, {
-              /* same as before */
-            });
-
-            // Ring timeout -> missed call
-            ringTimers.set(
+          await sendPushNotificationToUser(receiverId, {
+            priority: "high",
+            ttl: Math.floor(RING_TIMEOUT_MS / 1000),
+            channelId: "incoming_calls",
+            // NOTE: no title/body on purpose.
+            // If your helper also serves iOS tokens that need a visible alert,
+            // add title/body for iOS tokens ONLY.
+            data: {
+              type: "incoming_call",
+              router: "/call/audio-call",
               roomId,
-              setTimeout(async () => {
-                const c = activeCalls.get(roomId);
-                if (c && !c.answered) {
-                  ringTimers.delete(roomId);
-                  await finalizeCall(roomId); // mark as missed inside if you can
-                  emitCallEnded(roomId, c);
-                  sendPushNotificationToUser(receiverId, {
-                    data: { type: "call_cancelled", roomId },
-                  }).catch(() => {});
-                }
-              }, RING_TIMEOUT_MS)
-            );
-          }
-
-          socket.to(roomId).emit("kookohor-user-connected", {
-            /* same as before */
+              callerId,
+              receiverId,
+              callerName,
+              callerProfilePicture: callerUser?.profilePicture || "",
+              receiverName,
+              receiverProfilePicture: receiverUser?.profilePicture || "",
+              isCaller: "false",
+              sentAt: String(Date.now()),
+            },
           });
-
-          console.log(
-            `📞 [kookohor-join-room] Call push notification sent to ${receiverId}`
-          );
         } catch (callNotifErr) {
           console.error(
-            "❌ [kookohor-join-room] Failed to send call push:",
+            "❌ [kookohor-join-room] call push failed:",
             callNotifErr
           );
         }
-        // ========================================================
+
+        // 3) Ring timeout -> missed call. Cleans up EVERY device, even killed apps.
+        clearRingTimer(roomId);
+        ringTimers.set(
+          roomId,
+          setTimeout(async () => {
+            ringTimers.delete(roomId);
+            const c = activeCalls.get(roomId);
+            if (c && !c.answered) {
+              try {
+                await endCallOnServer(roomId, c);
+              } catch (e) {
+                console.error("❌ [ring-timeout] error:", e);
+              }
+            }
+          }, RING_TIMEOUT_MS)
+        );
       }
 
+      // Tells the OTHER peer in the room that someone joined (caller then sends offer)
       socket.to(roomId).emit("kookohor-user-connected", {
         socketId: socket.id,
         callerId,
@@ -1807,8 +1855,6 @@ io.on("connection", (socket) => {
         .emit("kookohor-offer", { offer, senderSocketId: socket.id });
   });
 
-  // Inside your frontend socket listener for 'kookohor-answer'
-  // index.js (Server)
   socket.on("kookohor-answer", ({ answer, roomId, targetSocketId }) => {
     const target = targetSocketId || roomId || socket.roomId;
     if (target) {
@@ -1820,9 +1866,7 @@ io.on("connection", (socket) => {
 
     const activeRoomId = roomId || socket.roomId;
     if (activeRoomId) {
-      // Answered -> cancel the 40s missed-call timeout
-      clearRingTimer(activeRoomId);
-
+      clearRingTimer(activeRoomId); // answered -> no missed-call timeout
       const info = activeCalls.get(activeRoomId);
       if (info && !info.answered) {
         info.answered = true;
@@ -1830,7 +1874,7 @@ io.on("connection", (socket) => {
       }
     }
   });
-  
+
   socket.on(
     "kookohor-ice-candidate",
     ({ candidate, roomId, targetSocketId }) => {
@@ -1861,27 +1905,31 @@ io.on("connection", (socket) => {
     }
   });
 
+  // End / decline / cancel. Works even if the sender never joined the room.
   socket.on("kookohor-end-call", async (data) => {
     const roomId = data?.roomId || socket.roomId;
     if (!roomId) return;
-    const info = activeCalls.get(roomId); // grab BEFORE finalizeCall removes it
-    clearTimeout(ringTimers.get(roomId));
-    ringTimers.delete(roomId);
-
-    await finalizeCall(roomId);
-    emitCallEnded(roomId, info);
-
-    if (info?.receiverId && !info.answered) {
-      sendPushNotificationToUser(info.receiverId, {
-        data: { type: "call_cancelled", roomId },
-      }).catch(() => {});
+    try {
+      await endCallOnServer(roomId, {
+        callerId: data?.callerId,
+        receiverId: data?.receiverId,
+      });
+    } catch (e) {
+      console.error("❌ [kookohor-end-call] error:", e);
     }
-
-    const room = io.sockets.adapter.rooms.get(roomId);
-    if (room)
-      for (const sid of room) io.sockets.sockets.get(sid)?.leave(roomId);
   });
 
+  // ============================================================================
+  // PART 3 — inside your EXISTING socket.on("disconnect", ...) handler, add:
+  // ============================================================================
+  //
+  //   // Caller's socket dropped before the call was answered -> stop ringing
+  //   if (socket.roomId && activeCalls.has(socket.roomId)) {
+  //     const c = activeCalls.get(socket.roomId);
+  //     if (!c.answered && socket.callerId && c.callerId === socket.callerId) {
+  //       endCallOnServer(socket.roomId, c).catch(() => {});
+  //     }
+  //   }
   // ---- Inbox / Calls list ----
   socket.on("get_calls", async ({ userId }) => {
     try {
