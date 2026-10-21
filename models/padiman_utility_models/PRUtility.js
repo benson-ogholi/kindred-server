@@ -1,0 +1,107 @@
+const mongoose = require("mongoose");
+
+const PRUtilitySchema = new mongoose.Schema(
+  {
+    fullName: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    username: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      lowercase: true,
+    },
+    phone: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      lowercase: true,
+    },
+    password: {
+      type: String,
+    
+      required: true,
+    },
+    countryCode: {
+      type: String,
+      default: "NG",
+    },
+    dialCode: {
+      type: String,
+      default: "+234",
+    },
+    isWorkman: {
+      type: Boolean,
+      default: false,
+      required: true,
+    },
+    isVerified: {
+      type: Boolean,
+      default: false,
+    },
+    expoPushToken: {
+      type: String,
+    },
+    profilePicture: {
+      type: String, // Backblaze URL
+      default: null,
+    },
+
+    gender: {
+      type: String,
+      enum: ["Male", "Female", "Other", "Prefer not to say"],
+      default: null,
+    },
+    address: {
+      type: String,
+      trim: true,
+    },
+    city: {
+      type: String,
+      trim: true,
+    },
+    skillset: {
+      type: [String],
+      default: [],
+    },
+    meansOfIdentification: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    isAvailable: {
+      type: Boolean,
+      default: false,
+    },
+  },
+  {
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
+  }
+);
+
+// Virtual to easily fetch all works linked to this PRUtility user
+PRUtilitySchema.virtual("works", {
+  ref: "Work",
+  localField: "_id",
+  foreignField: "workman",
+});
+
+// Existing indexes
+PRUtilitySchema.index({ email: 1 });
+PRUtilitySchema.index({ username: 1 });
+PRUtilitySchema.index({ city: 1 });
+PRUtilitySchema.index({ isWorkman: 1 });
+PRUtilitySchema.index({ isAvailable: 1 });
+
+module.exports = mongoose.model("PRUtility", PRUtilitySchema);

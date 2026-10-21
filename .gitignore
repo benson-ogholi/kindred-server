@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build Output
+dist/
+dist-ssr/
+
+# Environment Files & Secrets
+.env
+.env*.local
+*.env
+certs/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# IDE & OS Files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+kokohor-firebase-adminsdk.json
+*.json.env
+kokohor-firebase-adminsdk.json
+kokohor-firebase-adminsdk.json
+.env
+.env
+kokohor-firebase-adminsdk.json
