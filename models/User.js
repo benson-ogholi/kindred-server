@@ -145,29 +145,17 @@ const userSchema = new mongoose.Schema(
     ],
   },
   {
-    timestamps: true, // Automatically creates createdAt and updatedAt
+    timestamps: true,
   }
 );
 
-/* -----------------------------------------------------------
-   🛠️ MIDDLEWARE & TRANSFORMATIONS
------------------------------------------------------------ */
-
-/**
- * PROTECTION LOGIC:
- * Automatically strips sensitive data and hides savedFamilies
- * if the user status is 'suspended'.
- */
 userSchema.set("toJSON", {
   transform: (doc, ret) => {
-    // 1. Hide Families from Suspended Users
     if (ret.status === "suspended") {
       ret.savedFamilies = [];
     }
-
     delete ret.password;
     delete ret.__v;
-
     return ret;
   },
 });

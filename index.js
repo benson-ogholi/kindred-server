@@ -7,14 +7,18 @@ const http = require("http");
 const { Server } = require("socket.io");
 const admin = require("firebase-admin");
 
-// --- FIREBASE ADMIN INITIALIZATION VIA ENVIRONMENT VARIABLES ---
+// --- FIREBASE ADMIN INITIALIZATION VIA ENVIRONMENT VARIABLES (FIXED) ---
+let privateKey = process.env.FIREBASE_PRIVATE_KEY;
+if (privateKey) {
+  // Strip wrapping quotes if included literally and convert escaped \n sequences to actual newlines
+  privateKey = privateKey.replace(/^["']|["']$/g, "").replace(/\\n/g, "\n");
+}
+
 admin.initializeApp({
   credential: admin.credential.cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
     clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY
-      ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
-      : undefined,
+    privateKey: privateKey,
   }),
 });
 
