@@ -2,17 +2,26 @@
 const { Expo } = require("expo-server-sdk");
 const User = require("../models/User");
 
-let expo = new Expo();
+const expo = new Expo();
 
 /**
  * @param {String} userId
- * @param {Object} messageData - { title, body, router, data?, sound? }
+ * @param {Object} messageData - { title, body, router, data?, sound?, channelId?, priority?, badge? }
  */
 const sendPushNotificationToUser = async (userId, messageData) => {
   try {
     if (!userId) throw new Error("User ID is required");
 
-    const { title, body, router, data = {}, sound = "default" } = messageData;
+    const {
+      title,
+      body,
+      router,
+      data = {},
+      sound = "default",
+      channelId = "chat_messages_v2", // default channel is chat, NOT calls
+      priority = "high",
+      badge,
+    } = messageData;
 
     const user = await User.findById(userId);
     if (!user) {
@@ -22,28 +31,27 @@ const sendPushNotificationToUser = async (userId, messageData) => {
 
     const pushToken = user.expoPushToken;
 
-    // Check if token exists and is a valid Expo push token string
     if (!pushToken || !Expo.isExpoPushToken(pushToken)) {
       console.log(`No valid Expo push token found for user ${userId}`);
       return;
     }
 
-    const messages = [
-      {
-        to: pushToken,
-        sound,
-        title,
-        body,
-        data: {
-          router,
-          ...data,
-        },
-        priority: "high",
-        channelId: "calls",
+    const message = {
+      to: pushToken,
+      sound,
+      title,
+      body,
+      data: {
+        router,
+        ...data,
       },
-    ];
+      priority, // "high" = delivered immediately even in Doze mode
+      channelId, // must match a channel created in the app
+      ttl: 60 * 60, // drop if undelivered for 1 hour
+    };
+    if (badge !== undefined) message.badge = badge;
 
-    const chunks = expo.chunkPushNotifications(messages);
+    const chunks = expo.chunkPushNotifications([message]);
     const tickets = [];
 
     for (const chunk of chunks) {
@@ -55,12 +63,19 @@ const sendPushNotificationToUser = async (userId, messageData) => {
       }
     }
 
-    // Inspect tickets for immediate errors (e.g., DeviceNotRegistered)
     for (const ticket of tickets) {
       if (ticket.status === "error") {
         console.error(`Error sending notification ticket: ${ticket.message}`);
         if (ticket.details && ticket.details.error) {
           console.error(`Error code: ${ticket.details.error}`);
+
+          // Token is dead: clear it so we stop sending to it
+          if (ticket.details.error === "DeviceNotRegistered") {
+            await User.updateOne(
+              { _id: userId },
+              { $unset: { expoPushToken: "" } }
+            );
+          }
         }
       } else if (ticket.status === "ok") {
         console.log(
@@ -72,6 +87,5 @@ const sendPushNotificationToUser = async (userId, messageData) => {
     console.error("Error in sendPushNotificationToUser:", err.message);
   }
 };
-
 
 module.exports = { sendPushNotificationToUser };

@@ -374,7 +374,7 @@ router.get("/check-update", async (req, res) => {
     // Versions configured as numbers (e.g., Android versionCode / iOS build number)
     const latestVersions = {
       android: {
-        version: 31, // Number version for Android versionCode
+        version: 28, // Number version for Android versionCode
         title: "New Update Available!",
         description:
           "We've released a new performance update with bug fixes and improvements. Please update your app to continue enjoying the best experience.",
@@ -383,7 +383,7 @@ router.get("/check-update", async (req, res) => {
         forceUpdate: true,
       },
       ios: {
-        version: 31, // Number version for build number/version
+        version: 28, // Number version for build number/version
         title: "New Update Available!",
         description:
           "We've released a new performance update with bug fixes and improvements. Please update your app to continue enjoying the best experience.",
