@@ -390,7 +390,7 @@ router.get("/check-update", async (req, res) => {
         // updateUrl: "", // Add iOS App Store link when ready
         // forceUpdate: false,
 
-        version: 28, // Number version for Android versionCode
+        version: 32, // Number version for Android versionCode
         title: "New Update Available!",
         description:
           "We've released a new performance update with bug fixes and improvements. Please update your app to continue enjoying the best experience.",
