@@ -355,7 +355,6 @@ router.post("/reset-password", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
-
 router.get("/check-update", async (req, res) => {
   try {
     const { platform, currentVersion } = req.query;
@@ -384,20 +383,13 @@ router.get("/check-update", async (req, res) => {
         forceUpdate: true,
       },
       ios: {
-        // version: 31, // Number version for iOS build number/version
-        // title: "New Update Available!",
-        // description: "A new version of Kokohor is available on the App Store.",
-        // updateUrl: "", // Add iOS App Store link when ready
-        // forceUpdate: false,
-
-        version: 31, // Number version for Android versionCode
+        version: 31, // Number version for build number/version
         title: "New Update Available!",
         description:
           "We've released a new performance update with bug fixes and improvements. Please update your app to continue enjoying the best experience.",
         updateUrl:
           "https://play.google.com/store/apps/details?id=com.kokohor.app",
         forceUpdate: true,
-
       },
     };
 
@@ -418,7 +410,7 @@ router.get("/check-update", async (req, res) => {
     const parsedCurrentVersion = Number(currentVersion) || 0;
     const latestVersionNum = Number(platformInfo.version);
 
-    // Check if latest version number is greater than current version number
+    // ONLY show update if current version is strictly LESS than the latest version
     const hasUpdate = parsedCurrentVersion < latestVersionNum;
 
     console.log(`📊 [check-update] Comparison result for [${targetPlatform}]:`);
@@ -426,12 +418,24 @@ router.get("/check-update", async (req, res) => {
     console.log(`   - Latest Configured Version: ${latestVersionNum}`);
     console.log(`   - Has Update Available: ${hasUpdate}`);
 
+    // If there is no update, we return success with hasUpdate: false and leave out the update details
+    if (!hasUpdate) {
+      return res.status(200).json({
+        success: true,
+        platform: targetPlatform,
+        currentVersion: parsedCurrentVersion,
+        latestVersion: latestVersionNum,
+        hasUpdate: false,
+      });
+    }
+
+    // Otherwise, return full update info because current < latest
     return res.status(200).json({
       success: true,
       platform: targetPlatform,
       currentVersion: parsedCurrentVersion,
       latestVersion: latestVersionNum,
-      hasUpdate: hasUpdate,
+      hasUpdate: true,
       title: platformInfo.title,
       description: platformInfo.description,
       updateUrl: platformInfo.updateUrl,
