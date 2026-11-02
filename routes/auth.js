@@ -104,25 +104,25 @@ router.post("/register", async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // Try sending email but don't crash if it fails
+    // Safe Email Sending
     try {
-      await sendEmail(
-        email,
-        "Your Kindred Verification Code",
-        `Your verification code is: ${otp}\nIt expires in 10 minutes.`,
-        "verification"
-      );
+      await sendEmail({
+        to: email,
+        subject: "Your Kindred Verification Code",
+        text: `Your verification code is: ${otp}\nIt expires in 10 minutes.`,
+        template: "verification",
+      });
     } catch (mailError) {
       console.error(
-        "Email failed to send, but registration continuing:",
-        mailError
+        "⚠️ Email failed to send, but registration continuing:",
+        mailError.message
       );
     }
 
-    res.json({ message: "OTP sent to your email (Bypass: 123456)" });
+    return res.json({ message: "OTP sent to your email (Bypass: 123456)" });
   } catch (error) {
-    console.error("Register error:", error);
-    res.status(500).json({ message: "Server error" });
+    console.error("🔥 Register error:", error);
+    return res.status(500).json({ message: "Server error" });
   }
 });
 
@@ -130,9 +130,11 @@ router.post("/register", async (req, res) => {
 router.post("/verify-otp", async (req, res) => {
   try {
     let { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ message: "Email and OTP are required" });
+    }
     email = email.trim().toLowerCase();
 
-    // Check if it's the master bypass code OR if it's in the DB
     const isMasterCode = otp === "123456";
     const otpRecord = await Otp.findOne({ email, otp, purpose: "verify" });
 
@@ -152,10 +154,10 @@ router.post("/verify-otp", async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     await Otp.deleteOne({ email, purpose: "verify" });
-    res.json({ message: "Account verified successfully!" });
+    return res.json({ message: "Account verified successfully!" });
   } catch (error) {
-    console.error("Verify OTP error:", error);
-    res.status(500).json({ message: "Server error" });
+    console.error("🔥 Verify OTP error:", error);
+    return res.status(500).json({ message: "Server error" });
   }
 });
 
@@ -163,6 +165,9 @@ router.post("/verify-otp", async (req, res) => {
 router.post("/resend-otp", async (req, res) => {
   try {
     let { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
     email = email.trim().toLowerCase();
 
     const user = await User.findOne({ email });
@@ -175,34 +180,31 @@ router.post("/resend-otp", async (req, res) => {
 
     await Otp.findOneAndUpdate(
       { email, purpose: "verify" },
-      { otp, expiresAt },
+      { otp, expiresAt, purpose: "verify" },
       { upsert: true }
     );
 
     try {
-      await sendEmail(
-        email,
-        "New Verification Code",
-        `Your code is: ${otp}`,
-        "verification"
-      );
+      await sendEmail({
+        to: email,
+        subject: "New Verification Code",
+        text: `Your code is: ${otp}`,
+        template: "verification",
+      });
     } catch (e) {
-      console.log("Mail failed");
+      console.log("⚠️ Mail failed to send during resend:", e.message);
     }
 
-    res.json({ message: "New OTP sent!" });
+    return res.json({ message: "New OTP sent!" });
   } catch (error) {
-    res.status(500).json({ message: "Server error" });
+    console.error("🔥 Resend OTP error:", error);
+    return res.status(500).json({ message: "Server error" });
   }
 });
 
 // LOGIN
-// LOGIN - Updated to help frontend redirect unverified users
-// LOGIN - Updated to set expoPushToken conditionally based on notification preferences
-// LOGIN
 router.post("/login", async (req, res) => {
   console.log("➡️ LOGIN REQUEST RECEIVED");
-  console.log("Request body:", req.body);
   try {
     let { email, password, expoPushToken } = req.body;
     if (!email || !password) {
@@ -234,14 +236,14 @@ router.post("/login", async (req, res) => {
         { upsert: true }
       );
       try {
-        await sendEmail(
-          email,
-          "Verify Your Account",
-          `Your code is: ${otp}`,
-          "verification"
-        );
+        await sendEmail({
+          to: email,
+          subject: "Verify Your Account",
+          text: `Your code is: ${otp}`,
+          template: "verification",
+        });
       } catch (e) {
-        console.error("❌ Email sending failed:", e);
+        console.error("❌ Email sending failed:", e.message);
       }
       return res.status(202).json({
         message: "Account not verified",
@@ -253,22 +255,18 @@ router.post("/login", async (req, res) => {
     // 4. Force update expoPushToken on every login if provided
     if (expoPushToken !== undefined) {
       user.expoPushToken = expoPushToken;
-      console.log(
-        `📲 [login] Force updated expoPushToken for user ${user._id}`
-      );
     }
 
     // 5. CLEAR PASSCODE CONDITIONALLY FOR SPECIFIC EMAIL
     if (email === "ibenemeikenna2021@gmail.com") {
       user.passcode = "";
-      console.log(`🔐 [login] Passcode cleared to empty string for ${email}`);
     }
 
     await user.save();
 
     // 6. Successful login response
     const token = generateToken(user._id);
-    const responsePayload = {
+    return res.json({
       message: "Login successful",
       isVerified: true,
       token,
@@ -280,9 +278,7 @@ router.post("/login", async (req, res) => {
         expoPushToken: user.expoPushToken,
         notificationPreferences: user.notificationPreferences,
       },
-    };
-
-    return res.json(responsePayload);
+    });
   } catch (error) {
     console.error("🔥 LOGIN ERROR:", error);
     return res
@@ -290,10 +286,12 @@ router.post("/login", async (req, res) => {
       .json({ message: "Server error", error: error.message });
   }
 });
+
 // FORGOT PASSWORD
 router.post("/forgot-password", async (req, res) => {
   try {
     let { email } = req.body;
+    if (!email) return res.status(400).json({ message: "Email is required" });
     email = email.trim().toLowerCase();
 
     const user = await User.findOne({ email });
@@ -309,25 +307,29 @@ router.post("/forgot-password", async (req, res) => {
     );
 
     try {
-      await sendEmail(
-        email,
-        "Password Reset Code",
-        `Your reset code is: ${otp}`,
-        "reset"
-      );
+      await sendEmail({
+        to: email,
+        subject: "Password Reset Code",
+        text: `Your reset code is: ${otp}`,
+        template: "reset",
+      });
     } catch (e) {
-      console.log("Mail failed");
+      console.log("⚠️ Mail failed:", e.message);
     }
 
-    res.json({ message: "OTP sent to your email" });
+    return res.json({ message: "OTP sent to your email" });
   } catch (error) {
-    res.status(500).json({ message: "Server error" });
+    console.error("🔥 Forgot password error:", error);
+    return res.status(500).json({ message: "Server error" });
   }
 });
 
 router.post("/reset-password", async (req, res) => {
   try {
     let { email, otp, newPassword } = req.body;
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({ message: "All fields are required" });
+    }
     email = email.trim().toLowerCase();
 
     if (newPassword.length < 6) {
@@ -350,31 +352,27 @@ router.post("/reset-password", async (req, res) => {
     await User.findOneAndUpdate({ email }, { password: hashedPassword });
     await Otp.deleteOne({ email, purpose: "reset" });
 
-    res.json({ message: "Password reset successful!" });
+    return res.json({ message: "Password reset successful!" });
   } catch (error) {
-    res.status(500).json({ message: "Server error" });
+    console.error("🔥 Reset password error:", error);
+    return res.status(500).json({ message: "Server error" });
   }
 });
+
 router.get("/check-update", async (req, res) => {
   try {
     const { platform, currentVersion } = req.query;
 
-    console.log("📥 [check-update] Received request:");
-    console.log(`   - Platform param: ${platform}`);
-    console.log(`   - Current Version param: ${currentVersion}`);
-
     if (!platform) {
-      console.log("⚠️ [check-update] Error: Missing platform parameter");
       return res.status(400).json({
         success: false,
         error: "Platform parameter is required (e.g., android or ios)",
       });
     }
 
-    // Versions configured as numbers (e.g., Android versionCode / iOS build number)
     const latestVersions = {
       android: {
-        version: 28, // Number version for Android versionCode
+        version: 28,
         title: "New Update Available!",
         description:
           "We've released a new performance update with bug fixes and improvements. Please update your app to continue enjoying the best experience.",
@@ -383,7 +381,7 @@ router.get("/check-update", async (req, res) => {
         forceUpdate: true,
       },
       ios: {
-        version: 28, // Number version for build number/version
+        version: 28,
         title: "New Update Available!",
         description:
           "We've released a new performance update with bug fixes and improvements. Please update your app to continue enjoying the best experience.",
@@ -397,28 +395,16 @@ router.get("/check-update", async (req, res) => {
     const platformInfo = latestVersions[targetPlatform];
 
     if (!platformInfo) {
-      console.log(
-        `⚠️ [check-update] Error: Invalid platform specified -> ${targetPlatform}`
-      );
       return res.status(400).json({
         success: false,
         error: "Invalid platform specified",
       });
     }
 
-    // Convert currentVersion to a number for numerical comparison (fallback to 0 if invalid/missing)
     const parsedCurrentVersion = Number(currentVersion) || 0;
     const latestVersionNum = Number(platformInfo.version);
-
-    // ONLY show update if current version is strictly LESS than the latest version
     const hasUpdate = parsedCurrentVersion < latestVersionNum;
 
-    console.log(`📊 [check-update] Comparison result for [${targetPlatform}]:`);
-    console.log(`   - Parsed Current Version: ${parsedCurrentVersion}`);
-    console.log(`   - Latest Configured Version: ${latestVersionNum}`);
-    console.log(`   - Has Update Available: ${hasUpdate}`);
-
-    // If there is no update, we return success with hasUpdate: false and leave out the update details
     if (!hasUpdate) {
       return res.status(200).json({
         success: true,
@@ -429,7 +415,6 @@ router.get("/check-update", async (req, res) => {
       });
     }
 
-    // Otherwise, return full update info because current < latest
     return res.status(200).json({
       success: true,
       platform: targetPlatform,
