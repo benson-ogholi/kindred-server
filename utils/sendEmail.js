@@ -4,11 +4,16 @@ const nodemailer = require("nodemailer");
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user: process.env.MAIL_USER || process.env.GMAIL_USER || "kokohorcircle@gmail.com",
-    pass: process.env.MAIL_PASS || process.env.GMAIL_APP_PASS || "xrik levq mszq eldc",
+    user:
+      process.env.MAIL_USER ||
+      process.env.GMAIL_USER ||
+      "kokohorcircle@gmail.com",
+    pass:
+      process.env.MAIL_PASS ||
+      process.env.GMAIL_APP_PASS ||
+      "xrik levq mszq eldc",
   },
 });
-
 
 const getOtpEmailTemplate = (otp, purpose = "verification") => {
   const isReset = purpose === "reset";
@@ -17,10 +22,9 @@ const getOtpEmailTemplate = (otp, purpose = "verification") => {
     ? "We received a request to reset your password. Use the secure verification code below to proceed."
     : "Welcome to Kokohor Circle! Please use the verification code below to complete your setup.";
 
-  // Brand Palette (Gold & Deep Dark theme consistent with Kokohor Circle)
-  const primaryColor = "#EAB308"; // Kokohor Gold
-  const lightBg = "#FFFBEB"; // Soft light gold container background
-  const accentColor = "#92400E"; // Darker amber/gold text for OTP
+  const primaryColor = "#EAB308";
+  const lightBg = "#FFFBEB"; 
+  const accentColor = "#92400E"; 
 
   return `
 <!DOCTYPE html>
@@ -72,7 +76,12 @@ const getOtpEmailTemplate = (otp, purpose = "verification") => {
  * Accepts either structured options object: { to, subject, text, html, purpose, template }
  * OR positional arguments (for legacy compatibility): (to, subject, text, purpose/template)
  */
-const sendEmail = async (toOrOptions, subjectArg, textArg, purposeArg = "verification") => {
+const sendEmail = async (
+  toOrOptions,
+  subjectArg,
+  textArg,
+  purposeArg = "verification"
+) => {
   let to, subject, providedHtml, providedText, purpose;
 
   if (typeof toOrOptions === "object" && toOrOptions !== null) {
@@ -108,7 +117,9 @@ const sendEmail = async (toOrOptions, subjectArg, textArg, purposeArg = "verific
   if (otp || purpose === "verification" || purpose === "reset") {
     html = getOtpEmailTemplate(otp || "123456", purpose);
   } else {
-    html = providedHtml || `
+    html =
+      providedHtml ||
+      `
       <!DOCTYPE html>
       <html>
       <head><meta charset="utf-8"></head>
@@ -122,7 +133,9 @@ const sendEmail = async (toOrOptions, subjectArg, textArg, purposeArg = "verific
           <tr>
             <td style="padding: 40px 30px;">
               <h1 style="color: #FFFFFF; font-size: 22px; font-weight: 700; margin-top: 0; margin-bottom: 16px;">${subject}</h1>
-              <p style="color: #A78BFA; font-size: 16px; line-height: 1.6; margin: 0;">${providedText || ""}</p>
+              <p style="color: #A78BFA; font-size: 16px; line-height: 1.6; margin: 0;">${
+                providedText || ""
+              }</p>
             </td>
           </tr>
           <tr>
@@ -137,16 +150,24 @@ const sendEmail = async (toOrOptions, subjectArg, textArg, purposeArg = "verific
   }
 
   const mailOptions = {
-    from: `"Kokohor Circle" <${process.env.MAIL_USER || process.env.GMAIL_USER || "kokohorcircle@gmail.com"}>`,
+    from: `"Kokohor Circle" <${
+      process.env.MAIL_USER ||
+      process.env.GMAIL_USER ||
+      "kokohorcircle@gmail.com"
+    }>`,
     to,
     subject: `✨ ${subject}`,
-    text: providedText || "Please view this email in an HTML-compatible email client.",
+    text:
+      providedText ||
+      "Please view this email in an HTML-compatible email client.",
     html,
   };
 
   try {
     const info = await transporter.sendMail(mailOptions);
-    console.log(`📧 Email sent successfully to ${to} [MessageID: ${info.messageId}]`);
+    console.log(
+      `📧 Email sent successfully to ${to} [MessageID: ${info.messageId}]`
+    );
     return { success: true, messageId: info.messageId };
   } catch (error) {
     console.error("❌ Email delivery failed:", error.message);
