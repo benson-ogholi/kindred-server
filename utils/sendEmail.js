@@ -9,9 +9,7 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-/**
- * Generates clean, responsive HTML template for OTP / Verification / Reset purposes
- */
+
 const getOtpEmailTemplate = (otp, purpose = "verification") => {
   const isReset = purpose === "reset";
   const title = isReset ? "Reset Your Password" : "Verify Your Account";
