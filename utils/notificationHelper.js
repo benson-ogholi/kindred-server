@@ -1,7 +1,8 @@
 const { Expo } = require("expo-server-sdk");
-const User = require("../models/User");
-const Notification = require("../models/Notification");
-const Family = require("../models/Family");
+const User = require("../models/kokohor/User");
+const Notification = require("../models/kokohor/Notification");
+const Family = require("../models/kokohor/Family");
+const { isMutedFor } = require("./kokohor/moderation");
 
 // Initialize Expo SDK
 const expo = new Expo();
@@ -14,7 +15,7 @@ const expo = new Expo();
 async function sendPushNotificationToUser(userId, messageData) {
   try {
     if (!userId) throw new Error("User ID is required");
-    const { title, body, router } = messageData;
+    const { title, body, router, data = {}, channelId = "kokohor_general" } = messageData;
 
     console.log(`📡 Fetching push token for User ID: ${userId}...`);
     const user = await User.findById(userId).select(
@@ -41,14 +42,12 @@ async function sendPushNotificationToUser(userId, messageData) {
     }
 
     if (!Expo.isExpoPushToken(user.expoPushToken)) {
-      console.log(
-        `❌ Push skipped for ${userName}: Invalid Expo push token -> ${user.expoPushToken}`
-      );
+      console.log(`❌ Push skipped for ${userName}: invalid Expo push token`);
       return;
     }
 
     console.log(
-      `📤 Sending push notification to ${userName} (Token: ${user.expoPushToken})...`
+      `📤 Sending push notification to ${userName}...`
     );
 
     const message = {
@@ -56,7 +55,11 @@ async function sendPushNotificationToUser(userId, messageData) {
       sound: "default",
       title,
       body,
-      data: { router },
+      data: { router, ...data },
+      // Android only shows a push on a channel the app has created — see
+      // src/services/pushSetup.ts in the app ("kokohor_general").
+      channelId,
+      priority: "high",
     };
 
     const chunks = expo.chunkPushNotifications([message]);
@@ -128,14 +131,23 @@ async function createFamilyNotifications(familyId, senderId, data) {
     }
 
     // 1. Create in-app notification records in DB
-    const notifications = recipientIds.map((userId) => ({
-      recipient: userId,
-      familyId,
-      type: data.type,
-      title: data.title,
-      message: data.message,
-      relatedId: data.relatedId,
-    }));
+    // The sender's own copy is stored already-read so it never counts as
+    // unread for them; users who blocked the family/sender get none.
+    const notifications = [];
+    for (const userId of recipientIds) {
+      const isSender = userId === senderId.toString();
+      // eslint-disable-next-line no-await-in-loop
+      if (!isSender && (await isMutedFor(userId, { familyId, senderId, blockOnly: true }))) continue;
+      notifications.push({
+        recipient: userId,
+        familyId,
+        type: data.type,
+        title: data.title,
+        message: data.message,
+        relatedId: data.relatedId,
+        isRead: isSender,
+      });
+    }
 
     await Notification.insertMany(notifications);
     console.log(
@@ -151,28 +163,22 @@ async function createFamilyNotifications(familyId, senderId, data) {
       `🚀 Dispatching push notifications to ${pushRecipients.length} target recipient(s) (excluding sender)...`
     );
 
-    // 🔍 PRE-FETCH & LOG ALL EXPO PUSH TOKENS BEFORE SENDING
-    const pushUsers = await User.find({
-      _id: { $in: pushRecipients },
-    }).select("firstName lastName expoPushToken notificationPreferences");
-
-    console.log("\n📱 --- EXPO PUSH TOKENS TO BE NOTIFIED ---");
-    pushUsers.forEach((u) => {
-      console.log({
-        userId: u._id.toString(),
-        name: `${u.firstName || ""} ${u.lastName || ""}`.trim(),
-        expoPushToken: u.expoPushToken || "NO_TOKEN_REGISTERED",
-        pushEnabled: u.notificationPreferences?.push?.enabled ?? true,
-      });
-    });
-    console.log("-------------------------------------------\n");
+    // (Removed: logging of every recipient's push token.)
 
     // 3. Send individual push notification to each recipient using sendPushNotificationToUser
     for (const userId of pushRecipients) {
+      // Snoozed or blocked family/sender: keep the in-app record, skip the push.
+      if (await isMutedFor(userId, { familyId, senderId })) continue;
       await sendPushNotificationToUser(userId, {
         title: data.title,
         body: data.message,
-        router: data.router,
+        router: data.router || "/family/chat",
+        data: {
+          type: data.type,
+          familyId: String(familyId),
+          relatedId: data.relatedId ? String(data.relatedId) : "",
+          senderId: String(senderId),
+        },
       });
     }
 

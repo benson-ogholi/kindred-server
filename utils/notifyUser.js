@@ -1,12 +1,15 @@
 // notificationUtils.js
 const { Expo } = require("expo-server-sdk");
-const User = require("../models/User");
+const User = require("../models/kokohor/User");
+const { isMutedFor } = require("./kokohor/moderation");
 
 const expo = new Expo();
 
 /**
  * @param {String} userId
  * @param {Object} messageData - { title, body, router, data?, sound?, channelId?, priority?, badge? }
+ *   data.senderId / data.familyId (optional) are checked against the
+ *   recipient's block & snooze settings before sending.
  */
 const sendPushNotificationToUser = async (userId, messageData) => {
   try {
@@ -26,6 +29,12 @@ const sendPushNotificationToUser = async (userId, messageData) => {
     const user = await User.findById(userId);
     if (!user) {
       console.log(`User ${userId} not found, skipping notification.`);
+      return;
+    }
+
+    if (user.notificationPreferences?.push?.enabled === false) return;
+    if (await isMutedFor(userId, { senderId: data.senderId, familyId: data.familyId })) {
+      console.log(`Push to ${userId} skipped: sender/family is blocked or snoozed`);
       return;
     }
 

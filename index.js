@@ -5,62 +5,58 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
-const admin = require("firebase-admin");
 
-// --- FIREBASE ADMIN INITIALIZATION VIA ENVIRONMENT VARIABLES (FIXED) ---
-let privateKey = process.env.FIREBASE_PRIVATE_KEY;
-if (privateKey) {
-  // Strip wrapping quotes if included literally and convert escaped \n sequences to actual newlines
-  privateKey = privateKey.replace(/^["']|["']$/g, "").replace(/\\n/g, "\n");
-}
-
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: privateKey,
-  }),
-});
-
-const sendCallPush = async (userId, data, ttlMs = 40000) => {
-  try {
-    const u = await User.findById(userId).select("fcmToken").lean();
-    if (!u?.fcmToken) return;
-    const strData = {};
-    Object.entries(data).forEach(([k, v]) => (strData[k] = String(v ?? "")));
-    await admin.messaging().send({
-      token: u.fcmToken,
-      data: strData, // data-only, so the background handler always runs
-      android: { priority: "high", ttl: ttlMs },
-    });
-  } catch (e) {
-    console.error("[sendCallPush]", e.code || e.message);
-  }
-};
+// --- PUSH NOTIFICATIONS AUDIT FIX (objective #7) ---
+// This used to also `require("firebase-admin")` and initialize it here
+// (admin.initializeApp({ credential: admin.credential.cert({...}) })) purely
+// to support the `sendCallPush` helper below. Two separate problems with
+// that, found during this audit:
+//   1. `sendCallPush` read `user.fcmToken` and sent through firebase-admin's
+//      messaging API, but the User schema (models/kokohor/User.js) has no
+//      `fcmToken` field at all — only `expoPushToken`/`voipPushToken` — so
+//      this lookup was always undefined and every incoming-call ringing
+//      push silently no-op'd.
+//   2. Separately, with the firebase-admin version that satisfies this
+//      project's package.json range (^13.10.0, no lockfile pins it), the
+//      credential helper has moved: `admin.credential` is no longer an
+//      exported namespace, so `admin.credential.cert(...)` throws
+//      `Cannot read properties of undefined (reading 'cert')` at module load
+//      — i.e. the ENTIRE server (all 4 sub-servers in this codebase, not
+//      just kokohor) crashes on `node index.js` before it can even start
+//      listening, on a completely fresh `npm install`.
+// Since nothing else in this codebase uses firebase-admin, the fix is to
+// drop the dependency here entirely rather than patch its init call, and
+// use services/kokohor/pushService.js instead, which is Expo-based (same
+// proven mechanism as utils/notificationHelper.js / utils/notifyUser.js) and
+// the real `expoPushToken` field.
+const { sendCallRingingPush } = require("./services/kokohor/pushService");
+// Preserves the original (userId, data, ttlMs) call signature used at every
+// existing call site below — pushService's ttl parameter is in seconds.
+const sendCallPush = (userId, data, ttlMs = 40000) => sendCallRingingPush(userId, data, Math.round(ttlMs / 1000));
 
 const RequestingMessage = require("./models/padiman_utility_models/RequestingMessage");
-const authRoutes = require("./routes/auth");
-const familiesRoutes = require("./routes/family");
-const featuresRoutes = require("./routes/features");
-const newsRoutes = require("./routes/news.routes");
-const taskRoutes = require("./routes/task");
-const reportsRoutes = require("./routes/report");
-const suggestionsRoutes = require("./routes/suggestionRoutes");
-const pollRoutes = require("./routes/poll");
-const notificationsRoutes = require("./routes/notificationRoutes");
-const userRoutes = require("./routes/userRoutes");
-const donationsRoutes = require("./routes/donationCampaign.routes");
-const Message = require("./models/Message");
-const contentRoutes = require("./routes/familyContent");
+const authRoutes = require("./routes/kokohor/auth");
+const familiesRoutes = require("./routes/kokohor/family");
+const featuresRoutes = require("./routes/kokohor/features");
+const newsRoutes = require("./routes/kokohor/news.routes");
+const taskRoutes = require("./routes/kokohor/task");
+const reportsRoutes = require("./routes/kokohor/report");
+const suggestionsRoutes = require("./routes/kokohor/suggestionRoutes");
+const pollRoutes = require("./routes/kokohor/poll");
+const notificationsRoutes = require("./routes/kokohor/notificationRoutes");
+const userRoutes = require("./routes/kokohor/userRoutes");
+const donationsRoutes = require("./routes/kokohor/donationCampaign.routes");
+const Message = require("./models/kokohor/Message");
+const contentRoutes = require("./routes/kokohor/familyContent");
 const { uploadToBackblaze } = require("./utils/uploadToBackblaze");
-const familyMembers = require("./routes/familyMembers");
-const aiAnalysisRoutes = require("./routes/aiAnalysis");
-const SafetyNet = require("./routes/safetyNet");
-const adminRoutes = require("./routes/adminRoutes");
-const dashboardRouter = require("./routes/dashboardRoutes");
-const adminUserRoutes = require("./routes/adminUserRoutes");
-const adminFamilyRoutes = require("./routes/adminFamilyRoutes");
-const adminFinanceRoutes = require("./routes/adminFinanceRoutes");
+const familyMembers = require("./routes/kokohor/familyMembers");
+const aiAnalysisRoutes = require("./routes/kokohor/aiAnalysis");
+const SafetyNet = require("./routes/kokohor/safetyNet");
+const adminRoutes = require("./routes/kokohor/adminRoutes");
+const dashboardRouter = require("./routes/kokohor/dashboardRoutes");
+const adminUserRoutes = require("./routes/kokohor/adminUserRoutes");
+const adminFamilyRoutes = require("./routes/kokohor/adminFamilyRoutes");
+const adminFinanceRoutes = require("./routes/kokohor/adminFinanceRoutes");
 const pr_auth = require("./routes/pr/pr.auth.router");
 const pr_user = require("./routes/pr/pr.user.router");
 const pr_parcel = require("./routes/pr/pr.parcel.router");
@@ -92,7 +88,7 @@ const Request = require("./models/padiman_route_models/Request");
 const STATUS_COPY = require("./constants/pr/statusCopy");
 const pru_home = require("./routes/padiman_utility/pru.home.routes");
 const { sendPushNotificationToUser } = require("./utils/notifyUser");
-const { protect, checkStatus } = require("./middlewares/authMiddleware");
+const { protect, checkStatus } = require("./middlewares/kokohor/authMiddleware");
 const cooperative_auth = require("./routes/cooperative/authRoutes");
 const cooperative_admin = require("./routes/cooperative/adminRoutes");
 const cooperative_dividends = require("./routes/cooperative/dividendRoutes");
@@ -101,8 +97,18 @@ const cooperative_savings = require("./routes/cooperative/savingsRoutes");
 const cooperative_wallet = require("./routes/cooperative/walletRoutes");
 const cooperative_payments = require("./routes/cooperative/cooperativePaymentRouter");
 const cooperative_requests = require("./routes/cooperative/cooperativeRequestRoutes");
-const User = require("./models/User");
+const User = require("./models/kokohor/User");
 const pru_verify = require("./routes/pr/pr.verify");
+
+// --- Unified content/feed (Phase 2: objective #2) + Gamification (objective #5) ---
+const unifiedContentRoutes = require("./routes/kokohor/unifiedContent.routes");
+const gamificationRoutes = require("./routes/kokohor/gamification.routes");
+const { registerFeedSocketHandlers } = require("./sockets/kokohor/feedSocket");
+const { registerGroupCallNamespace } = require("./sockets/kokohor/groupCallSocket");
+const { registerMessageSocketHandlers } = require("./sockets/kokohor/messageSocket");
+const { startSafetyNetCron } = require("./cron/kokohor/safetyNetCrons");
+const GroupCallLog = require("./models/kokohor/GroupCallLog");
+const { isBlockedBetween } = require("./utils/kokohor/moderation");
 
 const app = express();
 const server = http.createServer(app);
@@ -115,12 +121,48 @@ const io = new Server(server, {
   },
 });
 
+// Socket auth (JWT in the handshake) for the main namespace and the group
+// call namespace — see middlewares/kokohor/socketAuth.js.
+const { socketAuthMiddleware, authUserId, SOCKET_AUTH_MODE } = require("./middlewares/kokohor/socketAuth");
+io.use(socketAuthMiddleware);
+io.of("/kokohor-group-calls").use(socketAuthMiddleware);
+
+// Lets REST controllers (e.g. unifiedContentController, which isn't part of
+// this file's giant io.on("connection", ...) closure) reach the same socket
+// server to broadcast feed events: `req.app.get("io")`.
+app.set("io", io);
+
+app.disable("x-powered-by");
+app.set("trust proxy", 1); // Render terminates TLS in front of the app
+// Baseline security headers (HSTS only applies once served over HTTPS).
+app.use((req, res, next) => {
+  res.set({
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  });
+  next();
+});
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1/families", familiesRoutes);
+// NOTE: /api/v1/features, /api/v1/news, /api/v1/tasks, /api/v1/reports,
+// /api/v1/suggestions, /api/v1/polls, /api/v1/donations and
+// /api/v1/family-content below are the pre-existing fragmented per-type
+// routes (now with their imports fixed — see Phase 1). They are left mounted
+// and fully working so existing clients keep working unmodified. The new
+// consolidated surface lives at /api/v1/feed (objective #2) and is the
+// recommended path for new client work — see the Phase 3 notes for the
+// suggested deprecation path for the routes below.
+app.use("/api/v1/feed", unifiedContentRoutes);
+app.use("/api/v1/calls", require("./routes/kokohor/callConfig"));
+// Share links / deep-link landing pages / .well-known (kokokorcircle.com)
+app.use(require("./routes/kokohor/shareLinks"));
+app.use("/api/v1/gamification", gamificationRoutes);
 app.use("/api/v1/features", featuresRoutes);
 app.use("/api/v1/news", newsRoutes);
 app.use("/api/v1/tasks", taskRoutes);
@@ -335,6 +377,9 @@ const createCallMessage = async ({
       receiverId,
       messageUuid,
       messageType: "call",
+      callStatus: ["missed", "ended", "rejected"].includes(status) ? status : "ended",
+      callType: isVideo ? "video" : "audio",
+      duration,
       timestamp: new Date(),
       isRead: false,
     });
@@ -1273,400 +1318,52 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("register_user", async ({ userId }) => {
-    if (!userId) return;
-    const cleanUserId = userId.toString();
-    onlineUsers.set(cleanUserId, socket.id);
-    socket.userId = cleanUserId;
-    socket.join(userRoom(cleanUserId));
-    try {
-      const user = await User.findById(cleanUserId);
-      if (user) {
-        user.socketId = socket.id;
-        user.isOnline = true;
-        await user.save();
-        console.log(
-          `🟢 [register_user] User ${cleanUserId} is now ONLINE (socket ${socket.id})`
-        );
-      }
-    } catch (err) {
-      console.error("[register_user] DB update failed:", err);
+  registerMessageSocketHandlers(io, socket, { onlineUsers });
+
+  // ---- 1-1 call authorization helpers ----
+  // Signaling is only relayed between sockets that joined the same call
+  // room, and only the two people on a call can accept/end it.
+  const relayTarget = (roomId, targetSocketId) => {
+    const rid = roomId || socket.roomId;
+    if (!rid || !socket.rooms.has(callRoom(rid))) return null;
+    if (targetSocketId) {
+      const t = io.sockets.sockets.get(targetSocketId);
+      return t && t.rooms.has(callRoom(rid)) ? targetSocketId : null;
     }
-  });
-
-  socket.on("join_room", async (data) => {
-    console.log(
-      "📥 [join_room] REQUEST RECEIVED:",
-      JSON.stringify(data, null, 2)
-    );
-
-    const { uuid, userId } = data;
-    if (!uuid) {
-      console.log("⚠️ [join_room] FAILED: Missing uuid in payload");
-      return;
-    }
-
-    socket.join(uuid);
-    console.log(`🏠 [join_room] Socket ${socket.id} joined room: ${uuid}`);
-
-    try {
-      console.log(
-        `⏳ [join_room] Marking unread messages as read for receiverId: ${userId} in room: ${uuid}`
-      );
-      const updateResult = await Message.updateMany(
-        { roomUuid: uuid, receiverId: userId, isRead: false },
-        { $set: { isRead: true } }
-      );
-      console.log(
-        "📖 [join_room] MESSAGES MARKED READ:",
-        JSON.stringify(updateResult, null, 2)
-      );
-
-      console.log(`⏳ [join_room] Fetching message history...`);
-      const history = await Message.find({ roomUuid: uuid })
-        .sort({ timestamp: 1 })
-        .lean();
-
-      const mappedHistory = history.map((msg) => {
-        const isImage = msg.messageType === "image";
-        const isVoice = msg.messageType === "voice";
-
-        return {
-          uuid: msg.messageUuid || msg.uuid,
-          message: msg.message,
-          senderName: msg.senderName,
-          senderId: msg.senderId,
-          timestamp: msg.timestamp
-            ? msg.timestamp.toISOString()
-            : new Date().toISOString(),
-          messageType: msg.messageType || "text",
-          imageuri: isImage
-            ? msg.imageuri || msg.mediaUri || undefined
-            : undefined,
-          audioUri: isVoice
-            ? msg.audioUri || msg.mediaUri || undefined
-            : undefined,
-          videouri: msg.videouri || "",
-          duration: msg.duration || 0,
-          status: "sent",
-          isRead: msg.isRead || false,
-        };
-      });
-
-      console.log(
-        `📤 [join_room] EMITTING LOAD_MESSAGES (Count: ${mappedHistory.length}) to socket.`
-      );
-      socket.emit("load_messages", mappedHistory);
-
-      const readUpdate = { roomUuid: uuid, readerId: userId };
-      io.to(uuid).emit("messages_marked_read", readUpdate);
-      console.log(
-        `✅ [join_room] Broadcasted 'messages_marked_read' to room: ${uuid}`
-      );
-    } catch (err) {
-      console.error("❌ [join_room] Error joining room:", err);
-    }
-  });
-
-  socket.on("send_message", async (data) => {
-    console.log(
-      "📥 [send_message] Received message payload from:",
-      data.userId,
-      "to room:",
-      data.uuid
-    );
-
-    const {
-      uuid: roomUuid,
-      message: textMessage,
-      fullName: senderName,
-      userId: senderId,
-      receiverId,
-      messageUuid,
-      messageType = "text",
-      mediaUri: base64Media,
-      duration = 0,
-      receiverProfilePicture = "",
-      senderProfilePicture = "",
-    } = data;
-
-    if (!roomUuid || !senderId || !receiverId || !messageUuid) {
-      console.error(`❌ [send_message] Missing required fields in payload.`);
-      return socket.emit("error", { message: "Missing required fields" });
-    }
-
-    try {
-      let imageuri = "",
-        videouri = "",
-        audioUri = "";
-
-      if (base64Media && messageType !== "text") {
-        console.log(
-          `⏳ [send_message] Processing base64 media upload for type: ${messageType}...`
-        );
-        const parts = base64Media.split(";base64,");
-        const base64Data = parts.length > 1 ? parts.pop() : parts[0];
-        const fileBuffer = Buffer.from(base64Data, "base64");
-
-        const extensionMap = { image: "jpg", video: "mp4", voice: "m4a" };
-        const extension = extensionMap[messageType] || "bin";
-        const fileName = `${messageType}s/${messageUuid}.${extension}`;
-
-        const uploadedUrl = await uploadToBackblaze(
-          fileBuffer,
-          fileName,
-          "chat_attachments"
-        );
-
-        if (messageType === "image") imageuri = uploadedUrl;
-        else if (messageType === "video") videouri = uploadedUrl;
-        else if (messageType === "voice") audioUri = uploadedUrl;
-
-        console.log(
-          "✅ [send_message] MEDIA UPLOADED:",
-          JSON.stringify(
-            { messageType, url: uploadedUrl, room: roomUuid },
-            null,
-            2
-          )
-        );
-      }
-
-      console.log(`⏳ [send_message] Saving new general chat message to DB...`);
-      const newMessage = new Message({
-        roomUuid,
-        message:
-          textMessage ||
-          (messageType === "image"
-            ? "📷 Sent a photo"
-            : messageType === "video"
-            ? "🎥 Sent a video"
-            : messageType === "voice"
-            ? "🎤 Sent a voice message"
-            : "New message"),
-        senderName: senderName || "User",
-        senderId,
-        receiverId,
-        messageUuid,
-        messageType,
-        imageuri,
-        videouri,
-        audioUri,
-        duration,
-        receiverProfilePicture,
-        senderProfilePicture,
-        timestamp: new Date(),
-        isRead: false,
-      });
-
-      await newMessage.save();
-      console.log(`✅ [send_message] Message saved with ID: ${newMessage._id}`);
-
-      const messageToSend = {
-        uuid: messageUuid,
-        message: newMessage.message,
-        senderName: newMessage.senderName,
-        senderId: newMessage.senderId,
-        timestamp: newMessage.timestamp.toISOString(),
-        messageType: newMessage.messageType,
-        imageuri: newMessage.imageuri,
-        videouri: newMessage.videouri,
-        audioUri: newMessage.audioUri,
-        duration: newMessage.duration,
-        senderProfilePicture: newMessage.senderProfilePicture,
-        receiverProfilePicture: newMessage.receiverProfilePicture,
-      };
-
-      console.log(
-        "📤 [send_message] OUTGOING MESSAGE PAYLOAD:",
-        JSON.stringify(messageToSend, null, 2)
-      );
-
-      io.to(roomUuid).emit("receive_message", messageToSend);
-      console.log(
-        `✅ [send_message] Broadcasted 'receive_message' to room: ${roomUuid}`
-      );
-
-      try {
-        let notificationBody = newMessage.message;
-        if (messageType === "image") notificationBody = "📷 Sent a photo";
-        else if (messageType === "video") notificationBody = "🎥 Sent a video";
-        else if (messageType === "voice")
-          notificationBody = "🎤 Sent a voice message";
-
-        await sendPushNotificationToUser(receiverId, {
-          title: senderName || "New Message",
-          body: notificationBody,
-          router: "/messages/chat",
-          data: {
-            type: "chat_message",
-            uuid: roomUuid,
-            messageUuid,
-            senderId,
-            senderName: newMessage.senderName,
-            receiverId,
-            receiverName: data.receiverName || "",
-            receiverProfilePicture: newMessage.receiverProfilePicture,
-            senderProfilePicture: newMessage.receiverProfilePicture,
-            messageType,
-          },
-          sound: "default",
-        });
-
-        console.log(
-          `🔔 [send_message] Push notification sent to receiver: ${receiverId}`
-        );
-      } catch (notifErr) {
-        console.error(
-          "❌ [send_message] Failed to send push notification:",
-          notifErr
-        );
-      }
-
-      console.log(
-        `⏳ [send_message] Calculating unread count for receiver: ${receiverId}...`
-      );
-      const unreadCount = await Message.countDocuments({
-        receiverId,
-        isRead: false,
-      });
-
-      io.to(roomUuid).emit("unread_update", {
-        roomUuid,
-        unreadCount,
-        lastMessage: newMessage.message,
-      });
-
-      io.to(receiverId).emit(`latest_msg_${receiverId}`, {
-        roomUuid,
-        lastMessage: newMessage.message,
-        timestamp: newMessage.timestamp,
-        senderId,
-        senderName: newMessage.senderName,
-        receiverId,
-        unreadCount,
-        profilePicture: newMessage.senderProfilePicture,
-      });
-
-      console.log(
-        `✅ [send_message] Broadcasted 'unread_update' with count: ${unreadCount}`
-      );
-    } catch (err) {
-      console.error(
-        "❌ [send_message] Error processing voice/media message:",
-        err
-      );
-      socket.emit("message_error", {
-        messageUuid,
-        error: "Media upload failed or message processing error",
-      });
-    }
-  });
-
-  socket.on(
-    "edit_message",
-    async ({ uuid, messageUuid, newMessage, userId }) => {
-      console.log(
-        `📥 [edit_message] Received edit request for message: ${messageUuid} from user: ${userId}`
-      );
-      try {
-        const msg = await Message.findOne({ messageUuid, senderId: userId });
-        if (!msg) {
-          console.error(
-            `❌ [edit_message] Message not found or access denied.`
-          );
-          return socket.emit("error", { message: "Access denied" });
-        }
-
-        const minutesPassed =
-          (Date.now() - new Date(msg.timestamp).getTime()) / 60000;
-        if (minutesPassed > 5) {
-          console.error(
-            `❌ [edit_message] Time limit exceeded. (${minutesPassed.toFixed(
-              2
-            )} mins)`
-          );
-          return socket.emit("error", { message: "Time limit exceeded" });
-        }
-
-        msg.message = newMessage.trim();
-        await msg.save();
-
-        io.to(uuid).emit("message_edited", {
-          uuid: messageUuid,
-          newMessage: msg.message,
-        });
-        console.log(
-          `✅ [edit_message] Message edited and broadcasted successfully: ${messageUuid}`
-        );
-      } catch (err) {
-        console.error("❌ [edit_message] Edit failed:", err);
-      }
-    }
-  );
-
-  socket.on("mark_messages_read", async ({ uuid, userId }) => {
-    if (!uuid || !userId) return;
-    try {
-      const result = await Message.updateMany(
-        { roomUuid: uuid, receiverId: userId, isRead: false },
-        { $set: { isRead: true } }
-      );
-      if (result.modifiedCount > 0) {
-        io.to(uuid).emit("messages_marked_read", {
-          roomUuid: uuid,
-          readerId: userId,
-        });
-        console.log(
-          `📖 [mark_messages_read] Marked ${result.modifiedCount} message(s) read for ${userId} in ${uuid}`
-        );
-      }
-    } catch (err) {
-      console.error("❌ [mark_messages_read]", err);
-    }
-  });
-
-  socket.on(
-    "delete_message",
-    async ({ uuid, messageUuid, userId, forEveryone }) => {
-      try {
-        const msg = await Message.findOne({ messageUuid });
-        if (!msg) return;
-
-        if (forEveryone && msg.senderId === userId) {
-          await Message.deleteOne({ messageUuid });
-          io.to(uuid).emit("message_deleted", { uuid: messageUuid });
-        } else {
-          socket.emit("message_deleted", { uuid: messageUuid });
-        }
-      } catch (err) {
-        console.error("❌ [delete_message] Delete failed:", err);
-      }
-    }
-  );
-
-  socket.on("typing", (data) => {
-    socket.to(data.uuid).emit("user_typing", {
-      roomUuid: data.uuid,
-      name: data.fullName,
-      isTyping: true,
-    });
-  });
-
-  socket.on("stop_typing", (data) => {
-    socket.to(data.uuid).emit("user_typing", {
-      roomUuid: data.uuid,
-      isTyping: false,
-    });
-  });
+    return callRoom(rid);
+  };
+  const isCallParty = (info) => {
+    const me = socket.data?.kokohorUserId;
+    if (!me || !info) return true; // unauthenticated (rollout mode) → legacy behaviour
+    return me === String(info.callerId) || me === String(info.receiverId);
+  };
 
   socket.on("kookohor-join-room", async (data) => {
     const roomId = typeof data === "object" ? data.roomId : data;
-    const callerId = data?.callerId?.toString();
-    const receiverId = data?.receiverId?.toString();
     const isCaller = data?.isCaller !== false && data?.isCaller !== "false";
+    // The caller must be the authenticated user; the callee joins as itself.
+    const authed = socket.data?.kokohorUserId;
+    const claimedSelf = isCaller ? data?.callerId : data?.receiverId;
+    if (authed && claimedSelf && String(claimedSelf) !== authed) {
+      socket.emit("call-ended", { roomId, reason: "unauthorized" });
+      return; // impersonation attempt
+    }
+    if (!authed && SOCKET_AUTH_MODE === "enforce") {
+      socket.emit("call-ended", { roomId, reason: "unauthorized" });
+      return;
+    }
+    const callerId = isCaller ? authed || data?.callerId?.toString() : data?.callerId?.toString();
+    const receiverId = isCaller ? data?.receiverId?.toString() : authed || data?.receiverId?.toString();
+    if (roomId && callerId && receiverId && callerId === receiverId) return;
     const callType = data?.callType === "video" ? "video" : "audio";
     if (!roomId) return;
+
+    // Block check: either side blocked the other → refuse the call.
+    if (isCaller && callerId && receiverId && (await isBlockedBetween(callerId, receiverId))) {
+      socket.emit("call-ended", { roomId, reason: "blocked" });
+      socket.emit("kookohor-call-blocked", { roomId, message: "You can't call this user." });
+      return;
+    }
 
     if (isCaller) {
       // brand-new outgoing call: wipe anything left from a previous call on this room
@@ -1777,9 +1474,11 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("kookohor-accept-call", ({ roomId }) => {
+  socket.on("kookohor-accept-call", ({ roomId } = {}) => {
     const info = activeCalls.get(roomId);
     if (!info || info.answered) return;
+    const me = socket.data?.kokohorUserId;
+    if (me && me !== String(info.receiverId)) return; // only the callee can accept
 
     info.answered = true;
     info.answerTime = Date.now();
@@ -1798,45 +1497,22 @@ io.on("connection", (socket) => {
     ]).emit("call-accepted", { roomId, callKey: info.callKey });
   });
 
-  socket.on("kookohor-offer", ({ offer, roomId, targetSocketId }) => {
-    const target =
-      targetSocketId ||
-      (roomId || socket.roomId ? callRoom(roomId || socket.roomId) : null);
+  socket.on("kookohor-offer", ({ offer, roomId, targetSocketId } = {}) => {
+    const target = relayTarget(roomId, targetSocketId);
     if (target)
       socket
         .to(target)
         .emit("kookohor-offer", { offer, senderSocketId: socket.id });
   });
 
-  socket.on("kookohor-answer", ({ answer, roomId, targetSocketId }) => {
-    console.log(
-      `[kookohor-answer] Received answer from socket ID: ${socket.id}`,
-      {
-        roomId,
-        targetSocketId,
-        answer,
-      }
-    );
-
-    const target =
-      targetSocketId ||
-      (roomId || socket.roomId ? callRoom(roomId || socket.roomId) : null);
-
-    if (target) {
-      console.log(
-        `[kookohor-answer] Forwarding answer to target socket/room: ${target}`
-      );
-      socket.to(target).emit("kookohor-answer", {
-        answer,
-        senderSocketId: socket.id,
-      });
-    } else {
-      console.warn(
-        `[kookohor-answer] Warning: No target found for answer in room ${
-          roomId || socket.roomId
-        }`
-      );
-    }
+  socket.on("kookohor-answer", ({ answer, roomId, targetSocketId } = {}) => {
+    // (SDP is no longer logged — it contains network addresses/fingerprints.)
+    const target = relayTarget(roomId, targetSocketId);
+    if (!target) return;
+    socket.to(target).emit("kookohor-answer", {
+      answer,
+      senderSocketId: socket.id,
+    });
 
     const activeRoomId = roomId || socket.roomId;
     if (activeRoomId) {
@@ -1862,10 +1538,8 @@ io.on("connection", (socket) => {
 
   socket.on(
     "kookohor-ice-candidate",
-    ({ candidate, roomId, targetSocketId }) => {
-      const target =
-        targetSocketId ||
-        (roomId || socket.roomId ? callRoom(roomId || socket.roomId) : null);
+    ({ candidate, roomId, targetSocketId } = {}) => {
+      const target = relayTarget(roomId, targetSocketId);
       if (target)
         socket.to(target).emit("kookohor-ice-candidate", {
           candidate,
@@ -1876,7 +1550,8 @@ io.on("connection", (socket) => {
 
   socket.on("kookohor-switch-to-video", ({ roomId }) => {
     const targetRoom = roomId || socket.roomId;
-    const target = targetRoom ? callRoom(targetRoom) : null;
+    const target =
+      targetRoom && socket.rooms.has(callRoom(targetRoom)) ? callRoom(targetRoom) : null;
     if (target) {
       socket
         .to(target)
@@ -1886,7 +1561,8 @@ io.on("connection", (socket) => {
 
   socket.on("kookohor-switch-to-audio", ({ roomId }) => {
     const targetRoom = roomId || socket.roomId;
-    const target = targetRoom ? callRoom(targetRoom) : null;
+    const target =
+      targetRoom && socket.rooms.has(callRoom(targetRoom)) ? callRoom(targetRoom) : null;
     if (target) {
       socket
         .to(target)
@@ -1898,6 +1574,7 @@ io.on("connection", (socket) => {
     const roomId = data?.roomId || socket.roomId;
     if (!roomId) return;
     const info = activeCalls.get(roomId);
+    if (info && !isCallParty(info)) return; // not your call
     if (socket.roomId === roomId) socket.roomId = undefined;
     try {
       const declined =
@@ -1915,7 +1592,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("get_calls", async ({ userId }) => {
+  socket.on("get_calls", async ({ userId: claimedUserId } = {}) => {
+    const userId = authUserId(socket, claimedUserId);
+    if (!userId) return;
     try {
       const calls = await Message.aggregate([
         {
@@ -1992,13 +1671,78 @@ io.on("connection", (socket) => {
         isCaller: "true",
       }));
 
-      socket.emit("calls_list", mappedCalls);
+      // Group calls (sockets/kokohor/groupCallSocket.js) — merged into the
+      // same list. Per viewer: the initiator sees an outgoing call, anyone
+      // who joined sees it as answered, anyone rung who never joined sees
+      // it as missed.
+      let groupCalls = [];
+      if (mongoose.Types.ObjectId.isValid(userId)) {
+        try {
+          const logs = await GroupCallLog.find({
+            $or: [{ initiator: userId }, { invited: userId }, { joined: userId }],
+          })
+            .sort({ endedAt: -1 })
+            .limit(100)
+            .populate("familyIds", "familyName")
+            .populate("initiator", "firstName lastName profilePicture")
+            .lean();
+
+          groupCalls = logs.map((log) => {
+            const uid = String(userId);
+            const initiatorId = String(log.initiator?._id || log.initiator);
+            const isInitiator = initiatorId === uid;
+            const joined = (log.joined || []).map(String).includes(uid);
+            const families = (log.familyIds || []).filter(Boolean);
+            const familyName =
+              families.map((f) => f.familyName).filter(Boolean).join(", ") || "Family";
+            const callStatus = isInitiator
+              ? log.status === "missed" ? "missed" : "ended"
+              : joined ? "ended" : "missed";
+            const kind = log.callType === "video" ? "video" : "voice";
+            return {
+              _id: String(log._id),
+              uuid: `group-${log.callId}`,
+              roomUuid: log.callId,
+              roomId: log.callId,
+              isGroup: true,
+              callType: log.callType,
+              familyIds: families.map((f) => String(f._id)),
+              familyName,
+              message:
+                callStatus === "missed"
+                  ? `Missed group ${kind} call`
+                  : `Group ${kind} call`,
+              senderId: initiatorId,
+              senderName: `${log.initiator?.firstName || ""} ${log.initiator?.lastName || ""}`.trim(),
+              receiverId: families[0] ? String(families[0]._id) : "",
+              receiverName: familyName,
+              receiverProfilePicture: "",
+              participantsCount: (log.joined || []).length,
+              timestamp: new Date(log.endedAt || log.createdAt).toISOString(),
+              messageType: "call",
+              callStatus,
+              duration: callStatus === "missed" ? 0 : log.duration || 0,
+              isCaller: isInitiator ? "true" : "false",
+            };
+          });
+        } catch (groupErr) {
+          console.error("❌ [get_calls] group call logs failed:", groupErr);
+        }
+      }
+
+      const allCalls = [...mappedCalls, ...groupCalls].sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      );
+
+      socket.emit("calls_list", allCalls);
     } catch (err) {
       console.error("❌ [get_calls] Error:", err);
     }
   });
 
-  socket.on("get_conversations", async ({ userId }) => {
+  socket.on("get_conversations", async ({ userId: claimedUserId } = {}) => {
+    const userId = authUserId(socket, claimedUserId);
+    if (!userId) return;
     console.log(
       `📥 [get_conversations] Fetching inbox conversations for user: ${userId}`
     );
@@ -2108,10 +1852,7 @@ io.on("connection", (socket) => {
         { $sort: { timestamp: -1 } },
       ]);
 
-      console.log(
-        "📂 [get_conversations] UPDATED INBOX DATA EXTRACTED SUCCESSFULLY:",
-        JSON.stringify(conversations, null, 2)
-      );
+      console.log(`📂 [get_conversations] ${conversations.length} conversation(s)`);
 
       socket.emit("conversations_list", conversations);
       console.log(
@@ -2156,41 +1897,22 @@ io.on("connection", (socket) => {
   });
 });
 
+// --- Kokohor feed sockets (Phase 2b) + group calls (Phase 2d) ---
+// Additive: Socket.IO allows multiple "connection" listeners, each invoked
+// with the same socket, so this cannot interfere with the handler above.
+io.on("connection", (socket) => registerFeedSocketHandlers(io, socket));
+registerGroupCallNamespace(io);
+
 // --- DATABASE & SERVER START ---
 mongoose
   .connect(process.env.MONGODB_URI)
   .then(async () => {
     console.log("🟢 [Server] MongoDB Connected Successfully");
 
-    try {
-      const allUsers = await User.find({})
-        .select(
-          "fullName name firstName lastName email expoToken expoPushToken pushToken deviceToken fcmToken"
-        )
-        .lean();
+    // Safety Net vault release job (was defined but never started before).
+    startSafetyNetCron(io);
 
-      console.log(`\n📋 [Startup] Found ${allUsers.length} user(s):\n`);
-
-      allUsers.forEach((user, index) => {
-        const name =
-          user.fullName ||
-          user.name ||
-          `${user.firstName || ""} ${user.lastName || ""}`.trim() ||
-          "N/A";
-
-        const expoToken = user.expoPushToken || null;
-
-        console.log(`${index + 1}.`, {
-          name,
-          email: user.email || null,
-          expoToken,
-        });
-      });
-
-      console.log("\n✅ [Startup] Finished logging all users\n");
-    } catch (err) {
-      console.error("❌ [Startup] Failed to fetch users:", err);
-    }
+    // (Removed: a startup dump of every user's email and push token.)
   })
   .catch((err) => console.error("🔴 [Server] MongoDB Connection Error:", err));
 
