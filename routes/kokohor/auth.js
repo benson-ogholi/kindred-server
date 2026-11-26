@@ -38,7 +38,7 @@ router.post("/logout", async (req, res) => {
           socketId: null,
         },
       },
-      { new: true }
+      { new: true },
     );
 
     if (!user) {
@@ -101,7 +101,7 @@ router.post("/register", async (req, res) => {
     await Otp.findOneAndUpdate(
       { email, purpose: "verify" },
       { otp, expiresAt, purpose: "verify" },
-      { upsert: true, new: true }
+      { upsert: true, new: true },
     );
 
     // Safe Email Sending
@@ -115,7 +115,7 @@ router.post("/register", async (req, res) => {
     } catch (mailError) {
       console.error(
         "⚠️ Email failed to send, but registration continuing:",
-        mailError.message
+        mailError.message,
       );
     }
 
@@ -148,7 +148,7 @@ router.post("/verify-otp", async (req, res) => {
     const user = await User.findOneAndUpdate(
       { email },
       { isVerified: true },
-      { new: true }
+      { new: true },
     );
 
     if (!user) return res.status(404).json({ message: "User not found" });
@@ -181,7 +181,7 @@ router.post("/resend-otp", async (req, res) => {
     await Otp.findOneAndUpdate(
       { email, purpose: "verify" },
       { otp, expiresAt, purpose: "verify" },
-      { upsert: true }
+      { upsert: true },
     );
 
     try {
@@ -233,7 +233,7 @@ router.post("/login", async (req, res) => {
       await Otp.findOneAndUpdate(
         { email, purpose: "verify" },
         { otp, expiresAt, purpose: "verify" },
-        { upsert: true }
+        { upsert: true },
       );
       try {
         await sendEmail({
@@ -303,7 +303,7 @@ router.post("/forgot-password", async (req, res) => {
     await Otp.findOneAndUpdate(
       { email, purpose: "reset" },
       { otp, expiresAt, purpose: "reset" },
-      { upsert: true }
+      { upsert: true },
     );
 
     try {
@@ -370,24 +370,42 @@ router.get("/check-update", async (req, res) => {
       });
     }
 
+    // Latest store versions come from env (set when you release), never from
+    // code. Same number as the major of app.json "version" (32.0.0 → 32).
+    //   LATEST_ANDROID_VERSION=32  LATEST_IOS_VERSION=32
+    //   FORCE_UPDATE=true|false (or FORCE_UPDATE_ANDROID / FORCE_UPDATE_IOS)
+    //   PLAY_STORE_URL, APP_STORE_URL, UPDATE_TITLE, UPDATE_DESCRIPTION
+    // Unset → no update prompt.
+    const envBool = (v, fallback) =>
+      v === undefined
+        ? fallback
+        : ["1", "true", "yes"].includes(String(v).toLowerCase());
+    const title = process.env.UPDATE_TITLE || "New Update Available!";
+    const description =
+      process.env.UPDATE_DESCRIPTION ||
+      "We've released a new update with bug fixes and improvements. Please update your app to continue enjoying the best experience.";
     const latestVersions = {
       android: {
-        version: 28,
-        title: "New Update Available!",
-        description:
-          "We've released a new performance update with bug fixes and improvements. Please update your app to continue enjoying the best experience.",
+        version: process.env.LATEST_ANDROID_VERSION,
+        title,
+        description,
         updateUrl:
+          process.env.PLAY_STORE_URL ||
           "https://play.google.com/store/apps/details?id=com.kokohor.app",
-        forceUpdate: true,
+        forceUpdate: envBool(
+          process.env.FORCE_UPDATE_ANDROID,
+          envBool(process.env.FORCE_UPDATE, false),
+        ),
       },
       ios: {
-        version: 28,
-        title: "New Update Available!",
-        description:
-          "We've released a new performance update with bug fixes and improvements. Please update your app to continue enjoying the best experience.",
-        updateUrl:
-          "https://play.google.com/store/apps/details?id=com.kokohor.app",
-        forceUpdate: true,
+        version: process.env.LATEST_IOS_VERSION,
+        title,
+        description,
+        updateUrl: process.env.APP_STORE_URL || "https://apps.apple.com/",
+        forceUpdate: envBool(
+          process.env.FORCE_UPDATE_IOS,
+          envBool(process.env.FORCE_UPDATE, false),
+        ),
       },
     };
 
@@ -401,9 +419,15 @@ router.get("/check-update", async (req, res) => {
       });
     }
 
-    const parsedCurrentVersion = Number(currentVersion) || 0;
-    const latestVersionNum = Number(platformInfo.version);
-    const hasUpdate = parsedCurrentVersion < latestVersionNum;
+    // Accepts "32" or "32.0.0" (major is compared).
+    const parsedCurrentVersion =
+      parseInt(String(currentVersion || "").split(".")[0], 10) || 0;
+    const latestVersionNum =
+      parseInt(String(platformInfo.version || "").split(".")[0], 10) || 0;
+    const hasUpdate =
+      latestVersionNum > 0 &&
+      parsedCurrentVersion > 0 &&
+      parsedCurrentVersion < latestVersionNum;
 
     if (!hasUpdate) {
       return res.status(200).json({
@@ -427,7 +451,7 @@ router.get("/check-update", async (req, res) => {
       forceUpdate: platformInfo.forceUpdate,
     });
   } catch (error) {
-    console.error("🔥 Check Update Error:", error);
+    console.error("Check Update Error:", error);
     return res.status(500).json({
       success: false,
       error: "Server error checking for updates",
