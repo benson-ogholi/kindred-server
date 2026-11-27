@@ -431,6 +431,29 @@ const resolveActiveRoomId = (socket, explicitRoomId, callerId, receiverId) => {
 const RING_TIMEOUT_MS = 40_000;
 const ringTimers = new Map(); // module-level, shared by all sockets
 
+// A phone switching Wi-Fi <-> mobile data drops its socket for a few
+// seconds while the WebRTC media often survives (or recovers with an ICE
+// restart). Instead of ending an answered call the moment a socket drops,
+// wait this long for the same user to reconnect and "kookohor-rejoin-room".
+const CALL_RECONNECT_GRACE_MS =
+  (Number(process.env.CALL_RECONNECT_GRACE_SECONDS) || 20) * 1000;
+const reconnectTimers = new Map(); // roomId -> timeout
+
+const clearReconnectTimer = (roomId) => {
+  const t = reconnectTimers.get(roomId);
+  if (t) clearTimeout(t);
+  reconnectTimers.delete(roomId);
+};
+
+/** True if `userId` still has a live socket inside the call room. */
+const userStillInCall = async (roomId, userId, exceptSocketId) => {
+  if (!userId) return false;
+  const members = await io.in(callRoom(roomId)).fetchSockets();
+  return members.some(
+    (m) => m.id !== exceptSocketId && String(m.data?.callUserId || "") === String(userId)
+  );
+};
+
 const clearRingTimer = (roomId) => {
   const t = ringTimers.get(roomId);
   if (t) clearTimeout(t);
@@ -449,6 +472,7 @@ const finalizeCall = async (roomId, statusOverride) => {
   if (!callInfo) return;
   activeCalls.delete(roomId); // delete FIRST, before any await, so a quick redial isn't wiped
   clearRingTimer(roomId);
+  clearReconnectTimer(roomId);
 
   const isAnswered = callInfo.answered || Boolean(callInfo.answerTime);
   const duration = isAnswered
@@ -1392,6 +1416,8 @@ io.on("connection", (socket) => {
     socket.roomId = roomId;
     socket.callerId = callerId;
     socket.receiverId = receiverId;
+    socket.data.callUserId = isCaller ? callerId : receiverId;
+    clearReconnectTimer(roomId);
 
     // Tell the peer NOW so the offer can start. No DB work before this.
     socket.to(callRoom(roomId)).emit("kookohor-user-connected", {
@@ -1472,6 +1498,37 @@ io.on("connection", (socket) => {
     } catch (err) {
       console.error("❌ [kookohor-join-room] error:", err);
     }
+  });
+
+  // The app's socket reconnected (network switch / app resumed) during a
+  // call: put the new socket back in the call room so signaling (ICE
+  // restart) flows again. Ack tells the app whether the call still exists,
+  // so a call that ended while it was offline doesn't linger as a ghost.
+  socket.on("kookohor-rejoin-room", async ({ roomId } = {}, ack) => {
+    const reply = typeof ack === "function" ? ack : () => {};
+    const info = roomId ? activeCalls.get(roomId) : null;
+    if (!info) return reply({ ok: false, reason: "ended" });
+    const me = socket.data?.kokohorUserId || socket.userId;
+    if (!me && SOCKET_AUTH_MODE === "enforce") return reply({ ok: false, reason: "unauthorized" });
+    if (me && me !== String(info.callerId) && me !== String(info.receiverId)) {
+      return reply({ ok: false, reason: "unauthorized" });
+    }
+    clearReconnectTimer(roomId);
+    socket.join(roomId);
+    socket.join(callRoom(roomId));
+    socket.roomId = roomId;
+    socket.data.callUserId = me || socket.data.callUserId;
+    socket.to(callRoom(roomId)).emit("kookohor-peer-rejoined", { roomId, socketId: socket.id });
+    reply({ ok: true, answered: !!info.answered, callKey: info.callKey });
+  });
+
+  // Lightweight "is this call still on?" check (e.g. an incoming call that
+  // was ringing while the app's socket was offline).
+  socket.on("kookohor-call-alive", ({ roomId, callKey } = {}, ack) => {
+    if (typeof ack !== "function") return;
+    const info = roomId ? activeCalls.get(roomId) : null;
+    const alive = !!info && (!callKey || String(info.callKey) === String(callKey));
+    ack({ alive, answered: !!info?.answered });
   });
 
   socket.on("kookohor-accept-call", ({ roomId } = {}) => {
@@ -1870,9 +1927,30 @@ io.on("connection", (socket) => {
     console.log(`👋 [disconnect] Socket ${socket.id} disconnected`);
 
     const roomId = socket.roomId;
-    if (roomId && activeCalls.has(roomId)) {
+    const callInfo = roomId ? activeCalls.get(roomId) : null;
+    if (callInfo) {
+      const userId = socket.data?.callUserId;
       try {
-        await endCallOnServer(roomId, { reason: "peer-disconnected" });
+        if (await userStillInCall(roomId, userId, socket.id)) {
+          // An old socket timing out after the phone already reconnected.
+        } else if (callInfo.answered) {
+          // Answered call: give the phone time to reconnect.
+          io.to(callRoom(roomId)).emit("kookohor-peer-reconnecting", { roomId });
+          clearReconnectTimer(roomId);
+          reconnectTimers.set(
+            roomId,
+            setTimeout(async () => {
+              reconnectTimers.delete(roomId);
+              if (activeCalls.get(roomId) !== callInfo) return;
+              if (await userStillInCall(roomId, userId)) return;
+              endCallOnServer(roomId, { reason: "peer-disconnected" }).catch((e) =>
+                console.error("[disconnect] endCall failed:", e)
+              );
+            }, CALL_RECONNECT_GRACE_MS)
+          );
+        } else {
+          await endCallOnServer(roomId, { reason: "peer-disconnected" });
+        }
       } catch (e) {
         console.error("[disconnect] endCall failed:", e);
       }

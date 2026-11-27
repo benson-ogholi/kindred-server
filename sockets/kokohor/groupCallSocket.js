@@ -240,6 +240,12 @@ function endCallRecord(io, nsp, call) {
   broadcastActiveStatus(io, call, false);
   const room = groupCallRoom(call.callId);
   nsp.to(room).emit("group-call:ended", { callId: call.callId });
+  // People still being rung (never joined) must stop ringing too — they
+  // aren't in the call room, so tell their personal rooms on the main socket.
+  const stillRinging = (call.invitedIds || []).filter((id) => !call.joinedIds?.has(String(id)));
+  if (stillRinging.length) {
+    io.to(stillRinging.map(userRoom)).emit("kokohor:group-call:ended", { callId: call.callId });
+  }
   nsp.in(room).socketsLeave(room);
 }
 

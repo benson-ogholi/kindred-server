@@ -64,3 +64,11 @@
 - `ANDROID_SHA256_FINGERPRINTS` — Play Console → App integrity → App signing key SHA-256
 - `APPLE_TEAM_ID`
 - optional: `PLAY_STORE_URL`, `APP_STORE_URL`, `ANDROID_PACKAGE`, `IOS_BUNDLE_ID`
+
+## Call reliability (Android networks)
+
+- `kookohor-rejoin-room` / `kookohor-call-alive` socket events; answered 1-1
+  calls survive a socket drop for CALL_RECONNECT_GRACE_SECONDS (default 20).
+- Group calls: invitees still ringing get `kokohor:group-call:ended`.
+- `/calls/ice-servers`: optional own TURN (TURN_URLS, TURN_USERNAME,
+  TURN_CREDENTIAL), `hasTurn` flag, STUN-only responses not cached.
