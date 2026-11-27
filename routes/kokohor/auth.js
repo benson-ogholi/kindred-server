@@ -386,19 +386,15 @@ router.get("/check-update", async (req, res) => {
       "We've released a new update with bug fixes and improvements. Please update your app to continue enjoying the best experience.";
     const latestVersions = {
       android: {
-        version: process.env.LATEST_ANDROID_VERSION,
+        version: 34,
         title,
         description,
         updateUrl:
-          process.env.PLAY_STORE_URL ||
           "https://play.google.com/store/apps/details?id=com.kokohor.app",
-        forceUpdate: envBool(
-          process.env.FORCE_UPDATE_ANDROID,
-          envBool(process.env.FORCE_UPDATE, false),
-        ),
+        forceUpdate: true,
       },
       ios: {
-        version: process.env.LATEST_IOS_VERSION,
+        version: 34,
         title,
         description,
         updateUrl: process.env.APP_STORE_URL || "https://apps.apple.com/",
